@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Screen Reader</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { width: 240px; font-family: 'Segoe UI', sans-serif; background: #f0f0f0; color: #1a1a1a; }
+    .header { background: #444; color: white; padding: 14px 16px; }
+    .header-title { font-size: 14px; font-weight: 700; }
+    .header-sub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
+    .body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .btn { width: 100%; padding: 9px 12px; border-radius: 8px; border: none; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    .btn-primary { background: #444; color: white; }
+    .btn-primary:hover { background: #222; }
+    .btn-secondary { background: white; color: #444; border: 1.5px solid #aaa; }
+    .btn-secondary:hover { background: #e8e8e8; }
+    .status { background: white; border-radius: 8px; padding: 8px 10px; font-size: 11px; color: #555; border: 1px solid #ddd; }
+    .status.success { color: #107c10; border-color: #c8e6c9; }
+    .status.error { color: #d83b01; border-color: #ffccbc; }
+    .footer { padding: 6px 12px 10px; font-size: 10px; color: #999; text-align: center; border-top: 1px solid #ddd; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-title">Screen Reader</div>
+    <div class="header-sub">Edge Extension</div>
+  </div>
+  <div class="body">
+    <button class="btn btn-primary" id="readBtn">📋 Log Body Text</button>
+    <button class="btn btn-secondary" id="toggleBtn">◧ Toggle Panel</button>
+    <div class="status" id="status">Ready</div>
+  </div>
+  <div class="footer">Open DevTools (F12) → Console to view logs</div>
+  <script src="popup.js"></script>
+</body>
+</html>
