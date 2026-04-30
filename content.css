@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   Screen Reader Extension - Stealth Widget CSS
+   Screen Reader Extension - Personal Assistant UI
    ───────────────────────────────────────────── */
 
 /* Tiny stealth tab */
@@ -54,9 +54,9 @@
   top: 50%;
   z-index: 2147483647;
 
-  width: 220px;
-  max-height: 75vh;
-  min-height: 92px;
+  width: 260px;
+  max-height: 82vh;
+  min-height: 150px;
 
   display: flex;
   flex-direction: column;
@@ -64,14 +64,14 @@
   font-family: "Segoe UI", Arial, sans-serif;
   color: #111;
 
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid rgba(120, 120, 120, 0.06);
-  border-radius: 8px 0 0 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(120, 120, 120, 0.08);
+  border-radius: 10px 0 0 10px;
 
-  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.06);
+  box-shadow: -2px 0 14px rgba(0, 0, 0, 0.08);
   overflow: hidden;
 
-  opacity: 0.72;
+  opacity: 0.78;
   animation: __sr_stealthIn 0.22s ease both;
 
   transition:
@@ -82,16 +82,15 @@
 
 #__sr-panel:hover {
   opacity: 1;
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.07);
 }
 
-/* Since JS now sets left/top and transform:none, keep animation opacity-only */
 @keyframes __sr_stealthIn {
   from {
     opacity: 0;
   }
   to {
-    opacity: 0.72;
+    opacity: 0.78;
   }
 }
 
@@ -99,7 +98,7 @@
 .sr-drag-handle {
   flex: 0 0 auto;
 
-  padding: 5px 26px 4px 10px;
+  padding: 5px 28px 4px 10px;
 
   font-family: "Segoe UI", Arial, sans-serif;
   font-size: 9px;
@@ -107,8 +106,8 @@
   line-height: 1.2;
   letter-spacing: 0.25px;
 
-  color: rgba(20, 20, 20, 0.45);
-  background: rgba(255, 255, 255, 0.02);
+  color: rgba(20, 20, 20, 0.48);
+  background: rgba(255, 255, 255, 0.03);
   border-bottom: 1px solid rgba(160, 160, 160, 0.08);
 
   cursor: move;
@@ -117,7 +116,7 @@
 }
 
 .sr-drag-handle:hover {
-  color: rgba(20, 20, 20, 0.7);
+  color: rgba(20, 20, 20, 0.72);
   background: rgba(120, 120, 120, 0.05);
 }
 
@@ -160,7 +159,7 @@
   background: rgba(0, 0, 0, 0.06);
 }
 
-/* Body */
+/* Answer body */
 .sr-body {
   flex: 1 1 auto;
 
@@ -168,8 +167,8 @@
   overflow-y: auto;
   overflow-x: hidden;
 
-  min-height: 40px;
-  max-height: calc(75vh - 58px);
+  min-height: 54px;
+  max-height: calc(82vh - 150px);
 
   scrollbar-width: thin;
   scrollbar-color: rgba(150, 150, 150, 0.25) transparent;
@@ -200,9 +199,9 @@
   font-family: "Segoe UI", Arial, sans-serif;
   font-size: 11.5px;
   font-weight: 400;
-  line-height: 1.65;
+  line-height: 1.62;
 
-  color: rgba(0, 0, 0, 0.86);
+  color: rgba(0, 0, 0, 0.88);
 
   white-space: pre-wrap;
   word-break: break-word;
@@ -245,6 +244,124 @@
   font-size: 11px;
 }
 
+/* Input area */
+.sr-input-wrap {
+  flex: 0 0 auto;
+
+  padding: 7px 10px 6px;
+
+  border-top: 1px solid rgba(160, 160, 160, 0.1);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.sr-question-input {
+  width: 100%;
+  min-height: 54px;
+  max-height: 110px;
+  resize: vertical;
+
+  padding: 7px 8px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 11px;
+  line-height: 1.45;
+
+  color: rgba(0, 0, 0, 0.88);
+  background: rgba(255, 255, 255, 0.34);
+  border: 1px solid rgba(120, 120, 120, 0.16);
+  border-radius: 8px;
+
+  outline: none;
+
+  scrollbar-width: thin;
+  scrollbar-color: rgba(150, 150, 150, 0.25) transparent;
+
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.sr-question-input::placeholder {
+  color: rgba(30, 30, 30, 0.42);
+}
+
+.sr-question-input:focus {
+  background: rgba(255, 255, 255, 0.55);
+  border-color: rgba(70, 70, 70, 0.28);
+  box-shadow: 0 0 0 2px rgba(70, 70, 70, 0.05);
+}
+
+.sr-question-input::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sr-question-input::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sr-question-input::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.25);
+  border-radius: 8px;
+}
+
+/* Options row */
+.sr-options-row {
+  margin-top: 6px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sr-check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9.5px;
+  line-height: 1;
+
+  color: rgba(0, 0, 0, 0.58);
+
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sr-check-label input {
+  width: 11px;
+  height: 11px;
+  margin: 0;
+
+  accent-color: #555;
+  cursor: pointer;
+}
+
+.sr-mode-select {
+  max-width: 104px;
+
+  padding: 3px 5px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9.5px;
+  line-height: 1;
+
+  color: rgba(0, 0, 0, 0.7);
+  background: rgba(255, 255, 255, 0.36);
+  border: 1px solid rgba(120, 120, 120, 0.14);
+  border-radius: 7px;
+
+  outline: none;
+  cursor: pointer;
+}
+
+.sr-mode-select:focus {
+  border-color: rgba(70, 70, 70, 0.28);
+}
+
 /* Footer */
 .sr-footer {
   flex: 0 0 auto;
@@ -253,35 +370,45 @@
 
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 6px;
 
   border-top: 1px solid rgba(160, 160, 160, 0.12);
   background: rgba(255, 255, 255, 0.015);
 }
 
-/* Copy button */
-.sr-copy-btn {
-  padding: 3px 5px;
-
+/* Shared footer button styling */
+.sr-copy-btn,
+.sr-clear-btn,
+.sr-ask-btn {
   font-family: "Segoe UI", Arial, sans-serif;
-  font-size: 9px;
-  font-weight: 500;
   line-height: 1;
-  letter-spacing: 0.3px;
 
-  color: rgba(20, 20, 20, 0.58);
   background: transparent;
-  border: none;
-  border-radius: 6px;
+  border-radius: 999px;
 
   cursor: pointer;
-  opacity: 0.65;
 
   transition:
     opacity 0.15s ease,
     background 0.15s ease,
-    color 0.15s ease;
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+/* Copy button */
+.sr-copy-btn {
+  margin-right: auto;
+  padding: 3px 5px;
+
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.25px;
+
+  color: rgba(20, 20, 20, 0.58);
+  border: none;
+
+  opacity: 0.68;
 }
 
 .sr-copy-btn:hover {
@@ -290,28 +417,34 @@
   background: rgba(0, 0, 0, 0.05);
 }
 
+/* Clear button */
+.sr-clear-btn {
+  padding: 4px 8px;
+
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.2px;
+
+  color: rgba(0, 0, 0, 0.52);
+  border: 1px solid rgba(90, 90, 90, 0.08);
+}
+
+.sr-clear-btn:hover {
+  color: rgba(0, 0, 0, 0.82);
+  background: rgba(0, 0, 0, 0.045);
+  border-color: rgba(90, 90, 90, 0.15);
+}
+
 /* Ask button */
 .sr-ask-btn {
   padding: 4px 12px;
 
-  font-family: "Segoe UI", Arial, sans-serif;
   font-size: 10px;
-  font-weight: 500;
-  line-height: 1;
+  font-weight: 600;
   letter-spacing: 0.45px;
 
   color: rgba(0, 0, 0, 0.78);
-  background: transparent;
-  border: 1px solid rgba(90, 90, 90, 0.08);
-  border-radius: 999px;
-
-  cursor: pointer;
-
-  transition:
-    background 0.15s ease,
-    color 0.15s ease,
-    border-color 0.15s ease,
-    opacity 0.15s ease;
+  border: 1px solid rgba(90, 90, 90, 0.1);
 }
 
 .sr-ask-btn:hover:not(:disabled) {
@@ -325,29 +458,36 @@
   cursor: not-allowed;
 }
 
-/* Better behavior on very small screens */
+/* Small screens */
 @media (max-width: 420px) {
   #__sr-panel {
-    width: 200px;
-    max-height: 70vh;
+    width: 230px;
+    max-height: 76vh;
+  }
+
+  .sr-body {
+    max-height: calc(76vh - 150px);
   }
 
   .sr-answer {
     font-size: 11px;
   }
 
-  .sr-body {
-    max-height: calc(70vh - 58px);
+  .sr-question-input {
+    min-height: 48px;
   }
 }
 
-/* Reduce motion support */
+/* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   #__sr-panel,
   #__sr-tab,
   .sr-minimize,
   .sr-copy-btn,
-  .sr-ask-btn {
+  .sr-clear-btn,
+  .sr-ask-btn,
+  .sr-question-input,
+  .sr-mode-select {
     transition: none;
   }
 
