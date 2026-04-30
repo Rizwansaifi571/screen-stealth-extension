@@ -1,156 +1,361 @@
-/* ── Stealth tiny tab — always visible but nearly invisible ── */
+/* ─────────────────────────────────────────────
+   Screen Reader Extension - Stealth Widget CSS
+   ───────────────────────────────────────────── */
+
+/* Tiny stealth tab */
 #__sr-tab {
   position: fixed;
   right: 0;
   top: 50%;
   transform: translateY(-50%);
   z-index: 2147483647;
-  cursor: pointer;
 
-  /* Stealth: blend with page, ultra-subtle */
+  display: block;
+  padding: 6px 3px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
   font-size: 9px;
-  font-family: 'Segoe UI', sans-serif;
-  color: rgba(120, 120, 120, 0.35);        /* near-invisible grey text */
-  background: rgba(200, 200, 200, 0.08);   /* barely-there background */
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 1px;
+  writing-mode: vertical-rl;
+
+  color: rgba(90, 90, 90, 0.38);
+  background: rgba(220, 220, 220, 0.08);
   border: 1px solid rgba(150, 150, 150, 0.12);
   border-right: none;
   border-radius: 4px 0 0 4px;
-  padding: 6px 3px;
-  writing-mode: vertical-rl;
-  letter-spacing: 1px;
+
+  cursor: pointer;
+  -webkit-user-select: none;
   user-select: none;
-  transition: color 0.2s, background 0.2s;
 
-  /* No shadow, no glow — nothing that draws eye */
+  box-shadow: none;
+  opacity: 0.75;
+
+  transition:
+    opacity 0.18s ease,
+    color 0.18s ease,
+    background 0.18s ease,
+    border-color 0.18s ease;
 }
 
-/* Only you hovering makes it a touch more visible */
 #__sr-tab:hover {
-  color: rgba(80, 80, 80, 0.6);
-  background: rgba(200, 200, 200, 0.15);
+  opacity: 1;
+  color: rgba(40, 40, 40, 0.7);
+  background: rgba(220, 220, 220, 0.18);
+  border-color: rgba(120, 120, 120, 0.18);
 }
 
-/* ── Full panel — blends with page ─────────────────────── */
+/* Main panel */
 #__sr-panel {
   position: fixed;
   right: 0;
   top: 50%;
-  transform: translateY(-50%);
   z-index: 2147483647;
+
   width: 220px;
   max-height: 75vh;
-
-  /* Stealth: transparent, blends with whatever page is behind */
-  /* background: rgba(245, 245, 245, 0.5); */
-  /* backdrop-filter: blur(6px) saturate(0.8); */
-  /* -webkit-backdrop-filter: blur(6px) saturate(0.8); */
-  background: transparent;
-
-  /* border: 1px solid rgba(180, 180, 180, 0.25); */
-  /* border-right: none; */
-  /* border-radius: 10px 0 0 10px; */
-
-  /* Very faint shadow — not eye-catching */
-  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.06);
+  min-height: 92px;
 
   display: flex;
   flex-direction: column;
-  font-family: 'Segoe UI', sans-serif;
 
-  animation: __sr_stealthIn 0.3s ease both;
+  font-family: "Segoe UI", Arial, sans-serif;
+  color: #111;
+
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(120, 120, 120, 0.06);
+  border-radius: 8px 0 0 8px;
+
+  box-shadow: -2px 0 12px rgba(0, 0, 0, 0.06);
   overflow: hidden;
-  transition: opacity 0.3s, transform 0.3s;
+
+  opacity: 0.72;
+  animation: __sr_stealthIn 0.22s ease both;
+
+  transition:
+    opacity 0.25s ease,
+    transform 0.25s ease,
+    background 0.18s ease;
 }
 
+#__sr-panel:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* Since JS now sets left/top and transform:none, keep animation opacity-only */
 @keyframes __sr_stealthIn {
-  from { opacity: 0; transform: translateY(-50%) translateX(30px); }
-  to   { opacity: 0.6; transform: translateY(-50%) translateX(0); }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.72;
+  }
 }
 
-/* Minimize button — tiny, faint */
+/* Drag handle */
+.sr-drag-handle {
+  flex: 0 0 auto;
+
+  padding: 5px 26px 4px 10px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: 0.25px;
+
+  color: rgba(20, 20, 20, 0.45);
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(160, 160, 160, 0.08);
+
+  cursor: move;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sr-drag-handle:hover {
+  color: rgba(20, 20, 20, 0.7);
+  background: rgba(120, 120, 120, 0.05);
+}
+
+/* Minimize button */
 .sr-minimize {
   position: absolute;
-  top: 5px;
+  top: 4px;
   right: 7px;
-  background: none;
-  border: none;
-  font-size: 14px;
-  color: #000000;
-  cursor: pointer;
+  z-index: 1;
+
+  width: 16px;
+  height: 16px;
   padding: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 14px;
   line-height: 1;
-  transition: color 0.15s;
+
+  color: rgba(0, 0, 0, 0.65);
+  background: transparent;
+  border: none;
+  border-radius: 50%;
+
+  cursor: pointer;
+  opacity: 0.65;
+
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
 }
-.sr-minimize:hover { color: #000000; }
+
+.sr-minimize:hover {
+  opacity: 1;
+  color: #000;
+  background: rgba(0, 0, 0, 0.06);
+}
 
 /* Body */
 .sr-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 22px 10px 8px 10px;
-  /* Custom minimal scrollbar */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(150,150,150,0.2) transparent;
-}
-.sr-body::-webkit-scrollbar { width: 3px; }
-.sr-body::-webkit-scrollbar-thumb { background: rgba(150,150,150,0.25); border-radius: 2px; }
+  flex: 1 1 auto;
 
-/* Answer text — readable for YOU, low contrast to casual observer */
+  padding: 10px 10px 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  min-height: 40px;
+  max-height: calc(75vh - 58px);
+
+  scrollbar-width: thin;
+  scrollbar-color: rgba(150, 150, 150, 0.25) transparent;
+}
+
+.sr-body::-webkit-scrollbar {
+  width: 3px;
+}
+
+.sr-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sr-body::-webkit-scrollbar-thumb {
+  background: rgba(150, 150, 150, 0.25);
+  border-radius: 8px;
+}
+
+.sr-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(120, 120, 120, 0.38);
+}
+
+/* Answer text */
 .sr-answer {
+  margin: 0;
+  padding: 0;
+
+  font-family: "Segoe UI", Arial, sans-serif;
   font-size: 11.5px;
-  color: #000000;   /* readable but not bold-black */
+  font-weight: 400;
   line-height: 1.65;
+
+  color: rgba(0, 0, 0, 0.86);
+
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
+/* Loading state */
 .sr-answer.sr-loading {
-  color: rgba(100, 100, 100, 0.5);
+  color: rgba(80, 80, 80, 0.58);
   font-style: italic;
   font-size: 11px;
 }
+
 .sr-answer.sr-loading::after {
-  content: '';
+  content: "";
   display: inline-block;
+
   width: 7px;
   height: 7px;
-  border: 1.5px solid rgba(130,130,130,0.3);
-  border-top-color: rgba(80,80,80,0.6);
-  border-radius: 50%;
-  animation: __sr_spin 0.8s linear infinite;
-  margin-left: 5px;
-  vertical-align: middle;
-}
-@keyframes __sr_spin { to { transform: rotate(360deg); } }
+  margin-left: 6px;
 
-.sr-answer.sr-error { color: rgba(12, 2, 0, 0.7); }
+  border: 1.5px solid rgba(130, 130, 130, 0.25);
+  border-top-color: rgba(60, 60, 60, 0.7);
+  border-radius: 50%;
+
+  vertical-align: middle;
+
+  animation: __sr_spin 0.8s linear infinite;
+}
+
+@keyframes __sr_spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Error state */
+.sr-answer.sr-error {
+  color: rgba(155, 30, 10, 0.85);
+  font-size: 11px;
+}
 
 /* Footer */
 .sr-footer {
+  flex: 0 0 auto;
+
   padding: 6px 10px 8px;
+
   display: flex;
-  justify-content: flex-end;
-  border-top: 1px solid rgba(160, 160, 160, 0.15);
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+
+  border-top: 1px solid rgba(160, 160, 160, 0.12);
+  background: rgba(255, 255, 255, 0.015);
 }
 
-/* Ask button — minimal, barely styled */
-.sr-ask-btn {
+/* Copy button */
+.sr-copy-btn {
+  padding: 3px 5px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.3px;
+
+  color: rgba(20, 20, 20, 0.58);
   background: transparent;
-  color: #000000;
-  /* border: 1px solid rgba(120, 120, 120, 0.2); */
-  padding: 4px 12px;
-  border-radius: 10px;
-  font-size: 10px;
-  font-family: 'Segoe UI', sans-serif;
-  letter-spacing: 0.5px;
+  border: none;
+  border-radius: 6px;
+
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  opacity: 0.65;
+
+  transition:
+    opacity 0.15s ease,
+    background 0.15s ease,
+    color 0.15s ease;
 }
+
+.sr-copy-btn:hover {
+  opacity: 1;
+  color: rgba(0, 0, 0, 0.85);
+  background: rgba(0, 0, 0, 0.05);
+}
+
+/* Ask button */
+.sr-ask-btn {
+  padding: 4px 12px;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.45px;
+
+  color: rgba(0, 0, 0, 0.78);
+  background: transparent;
+  border: 1px solid rgba(90, 90, 90, 0.08);
+  border-radius: 999px;
+
+  cursor: pointer;
+
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease,
+    opacity 0.15s ease;
+}
+
 .sr-ask-btn:hover:not(:disabled) {
-  background: rgba(80, 80, 80, 0.22);
-  color: rgba(30, 30, 30, 0.85);
+  color: rgba(0, 0, 0, 0.95);
+  background: rgba(80, 80, 80, 0.13);
+  border-color: rgba(90, 90, 90, 0.16);
 }
+
 .sr-ask-btn:disabled {
-  opacity: 0.4;
+  opacity: 0.42;
   cursor: not-allowed;
+}
+
+/* Better behavior on very small screens */
+@media (max-width: 420px) {
+  #__sr-panel {
+    width: 200px;
+    max-height: 70vh;
+  }
+
+  .sr-answer {
+    font-size: 11px;
+  }
+
+  .sr-body {
+    max-height: calc(70vh - 58px);
+  }
+}
+
+/* Reduce motion support */
+@media (prefers-reduced-motion: reduce) {
+  #__sr-panel,
+  #__sr-tab,
+  .sr-minimize,
+  .sr-copy-btn,
+  .sr-ask-btn {
+    transition: none;
+  }
+
+  #__sr-panel {
+    animation: none;
+  }
+
+  .sr-answer.sr-loading::after {
+    animation: none;
+  }
 }

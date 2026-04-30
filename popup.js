@@ -15,7 +15,7 @@ document.getElementById("readBtn").addEventListener("click", async () => {
   setStatus("Reading...");
   try {
     const r = await chrome.tabs.sendMessage(tab.id, { action: "readPage" });
-    setStatus("✅ Logged to Console (F12)", "success");
+    setStatus("✅ Page text read successfully", "success");
   } catch (e) {
     setStatus("❌ Refresh page and try again", "error");
   }
