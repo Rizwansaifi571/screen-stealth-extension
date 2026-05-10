@@ -5,18 +5,91 @@
 
   const GROQ_API_KEYS = [
     "", 
+    "", 
+    "" 
     // Add more keys below. Empty strings are ignored.
   ].filter(Boolean);
 
-  const GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct";
-  // For max accuracy but lower practical daily usage:
-  // const GROQ_MODEL = "llama-3.3-70b-versatile";
+  const GROQ_MODELS = [
+    // Try stronger model first for better medium/hard question solving.
+    "llama-3.3-70b-versatile",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+  ];
+
+  const GEMINI_API_KEYS = [
+    // Paste one or many Gemini API keys here. Empty strings are ignored.
+    "",
+    "",
+    ""
+  ].filter(Boolean);
+
+  const GEMINI_MODELS = [
+    // Prioritize strongest reasoning model first, then faster/cheaper fallbacks.
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+  ];
 
   let activeGroqKeyIndex = 0;
+  let activeGroqModelIndex = 0;
+  let activeGeminiKeyIndex = 0;
+  let activeGeminiModelIndex = 0;
 
   const UI_STATE_KEY = "__sr_widget_ui_state_v2";
   const TOGGLE_HOTKEY_KEY = "H";
   const MAX_HISTORY_ITEMS = 6;
+  const MAX_RAW_PAGE_TEXT_CHARS = 50000;
+  const MAX_PAGE_CONTEXT_CHARS = 10000;
+  const MAX_SELECTED_TEXT_CHARS = 1400;
+  const STOPWORDS = new Set([
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "i",
+    "if",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "me",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "that",
+    "the",
+    "their",
+    "them",
+    "there",
+    "they",
+    "this",
+    "to",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "will",
+    "with",
+    "you",
+    "your",
+  ]);
 
   const STATE = {
     answerText: "",
@@ -28,6 +101,7 @@
     questionText: "",
     mode: "code",
     usePageContext: true,
+    deepSolve: true,
     chatHistory: [],
   };
 
@@ -64,6 +138,7 @@
       STATE.questionText = typeof saved?.questionText === "string" ? saved.questionText : "";
       STATE.mode = typeof saved?.mode === "string" ? saved.mode : "code";
       STATE.usePageContext = saved?.usePageContext !== false;
+      STATE.deepSolve = saved?.deepSolve !== false;
 
       if (Array.isArray(saved?.chatHistory)) {
         STATE.chatHistory = saved.chatHistory.slice(-MAX_HISTORY_ITEMS);
@@ -84,6 +159,7 @@
           questionText: STATE.questionText,
           mode: STATE.mode,
           usePageContext: STATE.usePageContext,
+          deepSolve: STATE.deepSolve,
           chatHistory: STATE.chatHistory.slice(-MAX_HISTORY_ITEMS),
         })
       );
@@ -208,6 +284,315 @@
     return getBodyText();
   }
 
+  function normalizeWhitespace(text) {
+    return String(text || "")
+      .replace(/\r/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function getSelectedText() {
+    const selected = window.getSelection?.()?.toString() || "";
+    return normalizeWhitespace(selected).slice(0, MAX_SELECTED_TEXT_CHARS);
+  }
+
+  function tokenizeForRetrieval(text) {
+    if (!text) return [];
+
+    const rawTokens = String(text)
+      .toLowerCase()
+      .replace(/[^a-z0-9#+._-]+/g, " ")
+      .split(/\s+/)
+      .filter(Boolean);
+
+    const unique = [];
+    const seen = new Set();
+
+    for (const token of rawTokens) {
+      if (seen.has(token)) continue;
+      if (!/\d/.test(token) && token.length < 3) continue;
+      if (STOPWORDS.has(token)) continue;
+      seen.add(token);
+      unique.push(token);
+      if (unique.length >= 30) break;
+    }
+
+    return unique;
+  }
+
+  function splitContextCandidates(text) {
+    const normalized = normalizeWhitespace(text);
+    if (!normalized) return [];
+
+    const blocks = normalized.split(/\n{2,}/).map((x) => x.trim()).filter(Boolean);
+    const candidates = [];
+
+    for (const block of blocks) {
+      if (block.length <= 850) {
+        candidates.push(block);
+        continue;
+      }
+
+      const lines = block.split(/\n+/).map((x) => x.trim()).filter(Boolean);
+      for (const line of lines) {
+        if (line.length <= 500) {
+          candidates.push(line);
+          continue;
+        }
+
+        for (let i = 0; i < line.length; i += 500) {
+          candidates.push(line.slice(i, i + 500));
+        }
+      }
+    }
+
+    return candidates;
+  }
+
+  function scoreContextCandidate(candidate, queryTokens) {
+    if (!candidate || !queryTokens.length) return 0;
+
+    const text = candidate.toLowerCase();
+    let score = 0;
+    let hitCount = 0;
+
+    for (const token of queryTokens) {
+      if (text.includes(token)) {
+        hitCount += 1;
+        score += token.length >= 6 ? 2.2 : 1.2;
+      }
+    }
+
+    score += Math.min(hitCount, 6) * 0.8;
+
+    if (/[?]/.test(candidate)) score += 1.1;
+    if (/\b(a|b|c|d|e)\s*[).:-]/i.test(candidate)) score += 0.7;
+    if (/\b(input|output|constraint|example|approach|edge case|complexity|proof|derive|equation)\b/i.test(text)) {
+      score += 1.3;
+    }
+    if (/\d/.test(candidate)) score += 0.35;
+    if (candidate.length > 700) score -= 0.6;
+
+    return score;
+  }
+
+  function buildRelevantPageContext(rawBodyText, customQuestion, selectedText) {
+    const cleanBody = normalizeWhitespace(String(rawBodyText || "").slice(0, MAX_RAW_PAGE_TEXT_CHARS));
+    const cleanSelected = normalizeWhitespace(selectedText).slice(0, MAX_SELECTED_TEXT_CHARS);
+    if (!cleanBody && !cleanSelected) return "";
+
+    const tokens = tokenizeForRetrieval(customQuestion);
+    let coreContext = cleanBody.slice(0, MAX_PAGE_CONTEXT_CHARS);
+
+    if (tokens.length && cleanBody) {
+      const candidates = splitContextCandidates(cleanBody);
+      const scored = candidates
+        .map((chunk, index) => ({ chunk, index, score: scoreContextCandidate(chunk, tokens) }))
+        .filter((x) => x.score > 0)
+        .sort((a, b) => b.score - a.score || a.index - b.index);
+
+      if (scored.length) {
+        const chosen = [];
+        const seen = new Set();
+        let usedChars = 0;
+
+        for (const item of scored) {
+          const key = item.chunk.toLowerCase();
+          if (seen.has(key)) continue;
+
+          const nextCost = item.chunk.length + 2;
+          if (usedChars + nextCost > MAX_PAGE_CONTEXT_CHARS) continue;
+
+          seen.add(key);
+          chosen.push(item);
+          usedChars += nextCost;
+
+          if (chosen.length >= 18 || usedChars >= MAX_PAGE_CONTEXT_CHARS * 0.92) break;
+        }
+
+        if (chosen.length) {
+          chosen.sort((a, b) => a.index - b.index);
+          coreContext = chosen.map((x) => x.chunk).join("\n\n").trim();
+        }
+      }
+    }
+
+    if (!cleanSelected) return coreContext.slice(0, MAX_PAGE_CONTEXT_CHARS);
+
+    const wrapped = [
+      "Selected text (highest priority):",
+      cleanSelected,
+      "",
+      "Other relevant page context:",
+      coreContext,
+    ].join("\n");
+
+    return wrapped.slice(0, MAX_PAGE_CONTEXT_CHARS);
+  }
+
+  function inferDifficulty(customQuestion, mode, bodyText) {
+    const q = String(customQuestion || "");
+    const t = `${q}\n${String(bodyText || "").slice(0, 2200)}`.toLowerCase();
+    let score = 0;
+
+    if (mode === "code") score += 2;
+    if (q.split(/\s+/).filter(Boolean).length >= 18) score += 2;
+    if ((t.match(/\b(if|else|for|while|class|function|return|import|#include)\b/g) || []).length >= 4) score += 1;
+    if ((t.match(/\n/g) || []).length >= 18) score += 1;
+    if (/\b(hard|difficult|medium|optimi[sz]e|dynamic programming|dp|graph|dfs|bfs|backtracking|proof|derive|complexity|edge case)\b/.test(t)) {
+      score += 3;
+    }
+
+    if (score >= 6) return "hard";
+    if (score >= 3) return "medium";
+    return "easy";
+  }
+
+  function shouldRunDeepSolve({ deepSolve, mode, customQuestion, difficulty }) {
+    if (!deepSolve) return false;
+    if (mode === "code") return true;
+    if (difficulty === "hard" || difficulty === "medium") return true;
+    if (String(customQuestion || "").split(/\s+/).filter(Boolean).length >= 20) return true;
+    return false;
+  }
+
+  function isLowConfidenceReply(reply, mode) {
+    const clean = String(reply || "").trim();
+    if (!clean) return true;
+
+    if (/i (am )?(not sure|cannot|can't|unable|don't know|insufficient)/i.test(clean)) {
+      return true;
+    }
+
+    if (mode === "code" && clean.length < 20) return true;
+    if (mode === "code" && !isCodeOnlyReplyValid(clean)) return true;
+    if (mode !== "code" && clean.length < 16) return true;
+
+    return false;
+  }
+
+  function getBracketDelta(text, openChar, closeChar) {
+    let delta = 0;
+    const value = String(text || "");
+    for (let i = 0; i < value.length; i += 1) {
+      const ch = value[i];
+      if (ch === openChar) delta += 1;
+      if (ch === closeChar) delta -= 1;
+    }
+    return delta;
+  }
+
+  function isCodeOnlyReplyValid(reply) {
+    const clean = String(reply || "").trim();
+    if (!clean) return false;
+
+    if (/```/.test(clean)) return false;
+
+    if (
+      /^(the problem asks|this problem asks|we need to|to solve|here'?s|let'?s|approach|algorithm|intuition)\b/i.test(
+        clean
+      )
+    ) {
+      return false;
+    }
+
+    if (
+      /\b(the problem asks|we can solve|we need to|algorithm is|intuition|time complexity|space complexity)\b/i.test(
+        clean
+      )
+    ) {
+      return false;
+    }
+
+    const lines = clean.split("\n").map((x) => x.trim()).filter(Boolean);
+    const commentLines = lines.filter((line) => {
+      return (
+        line.startsWith("//") ||
+        line.startsWith("/*") ||
+        line.startsWith("*") ||
+        line.startsWith("# ")
+      );
+    }).length;
+
+    if (lines.length > 0 && commentLines / lines.length > 0.25) {
+      return false;
+    }
+
+    const language = detectCodeLanguage(clean);
+    if (!language) return false;
+
+    if (["cpp", "java", "javascript", "c", "c++"].includes(language)) {
+      if (getBracketDelta(clean, "{", "}") !== 0) return false;
+      if (getBracketDelta(clean, "(", ")") !== 0) return false;
+      if (getBracketDelta(clean, "[", "]") !== 0) return false;
+    }
+
+    if (language === "cpp") {
+      const hasSolutionClass = /\bclass\s+Solution\b/.test(clean);
+      const hasMain = /\bint\s+main\s*\(/.test(clean);
+
+      if (!hasSolutionClass && !hasMain) return false;
+      if (hasSolutionClass && !/\bpublic\s*:/.test(clean)) return false;
+    }
+
+    if (language === "java") {
+      if (!/\bclass\s+\w+/.test(clean)) return false;
+    }
+
+    if (language === "python") {
+      if (!/\b(def|class)\s+\w+/.test(clean)) return false;
+    }
+
+    return true;
+  }
+
+  function sanitizeReply(reply, mode) {
+    let clean = String(reply || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+    if (mode === "code") {
+      const fencedAnywhere = clean.match(/```[a-zA-Z0-9#+._-]*\s*\n([\s\S]*?)```/i);
+      if (fencedAnywhere?.[1]) {
+        clean = fencedAnywhere[1].trim();
+      } else {
+        clean = clean.replace(/^```[a-zA-Z0-9#+._-]*\s*\n?/i, "");
+        clean = clean.replace(/```$/, "").trim();
+      }
+    }
+
+    return clean;
+  }
+
+  function getMaxCompletionTokens(mode, difficulty, isVerificationPass = false) {
+    if (mode === "code") {
+      if (difficulty === "hard") return isVerificationPass ? 8192 : 6144;
+      if (difficulty === "medium") return isVerificationPass ? 6144 : 4096;
+      return isVerificationPass ? 4096 : 3072;
+    }
+
+    if (mode === "explain") {
+      if (difficulty === "hard") return isVerificationPass ? 2200 : 1700;
+      if (difficulty === "medium") return isVerificationPass ? 1700 : 1300;
+      return isVerificationPass ? 1200 : 900;
+    }
+
+    if (difficulty === "hard") return isVerificationPass ? 1600 : 1200;
+    if (difficulty === "medium") return isVerificationPass ? 1200 : 900;
+    return isVerificationPass ? 900 : 700;
+  }
+
+  function getGeminiThinkingBudget(difficulty, mode, isVerificationPass = false) {
+    if (mode === "code") {
+      if (difficulty === "hard") return isVerificationPass ? 24576 : 20480;
+      if (difficulty === "medium") return isVerificationPass ? 12288 : 8192;
+      return isVerificationPass ? 6144 : 4096;
+    }
+
+    if (difficulty === "hard") return isVerificationPass ? 12288 : 8192;
+    if (difficulty === "medium") return isVerificationPass ? 6144 : 4096;
+    return isVerificationPass ? 2048 : 1024;
+  }
+
   function detectCodeLanguage(text) {
     const value = String(text || "").trim();
     if (!value) return null;
@@ -330,49 +715,67 @@
         text.includes("forbidden") ||
         text.includes("invalid"));
 
-    const isBadRequestOrModel =
-      status === 400 ||
-      text.includes("model") ||
-      text.includes("invalid_request_error") ||
-      text.includes("malformed");
+    const isModelUnavailable =
+      text.includes("model") &&
+      (text.includes("decommissioned") ||
+        text.includes("no longer supported") ||
+        text.includes("not found") ||
+        text.includes("not available") ||
+        text.includes("unknown model") ||
+        text.includes("unsupported"));
 
-    return { isRateOrQuota, isInvalidKey, isBadRequestOrModel };
+    const isBadRequest =
+      status === 400 || text.includes("invalid_request_error") || text.includes("malformed");
+
+    return { isRateOrQuota, isInvalidKey, isModelUnavailable, isBadRequest };
   }
 
-  function getSystemPrompt(mode) {
+  function getSystemPrompt(mode, deepSolve) {
     if (mode === "code") {
       return [
-        "You are a coding assistant.",
-        "Follow the user's latest instruction exactly.",
-        "If the user asks for code, output ONLY raw code.",
-        "Do not use markdown fences.",
-        "Do not add explanations unless the user explicitly asks for explanation.",
-        "If the user asks to fix code, return the corrected code only.",
+        "You are an expert competitive programming assistant.",
+        "The user needs accepted-level code for DSA medium/hard problems.",
+        "Think silently. Do not reveal reasoning.",
+        "Before final answer, internally verify constraints, edge cases, overflow, and time complexity.",
+        "Output ONLY complete final source code.",
+        "No markdown fences.",
+        "No explanations.",
+        "No comments.",
+        "No pseudo-code.",
+        "No incomplete functions.",
+        "No placeholders.",
+        "No text before or after code.",
+        "If the platform provides a class Solution template, return the complete class Solution implementation only.",
+        "If the user asks to fix code, return only the corrected complete code.",
+        deepSolve ? "Prefer correctness and edge-case safety over short code." : "",
       ].join(" ");
     }
 
     if (mode === "explain") {
       return [
-        "You are a clear study and coding assistant.",
+        "You are a clear and accurate study and coding assistant.",
         "Answer the user's latest question using the page context and previous relevant chat if helpful.",
-        "Explain briefly and clearly.",
-        "Avoid unnecessary long answers.",
+        "Think through the problem internally before answering.",
+        "Explain clearly with only the essential steps.",
+        deepSolve ? "Double-check the result before finalizing." : "",
       ].join(" ");
     }
 
     return [
-      "You are a concise study and coding assistant.",
+      "You are a concise and accurate study and coding assistant.",
       "Answer the user's latest question using the page context and previous relevant chat if helpful.",
-      "Keep the answer short and direct.",
+      "Think through the problem internally before answering.",
+      "Keep the answer concise but complete.",
       "If the user requests code only, provide only raw code without markdown.",
+      deepSolve ? "Verify the final answer before output." : "",
     ].join(" ");
   }
 
-  function buildMessages({ bodyText, customQuestion, mode, usePageContext }) {
+  function buildMessages({ bodyText, customQuestion, mode, usePageContext, deepSolve, difficulty }) {
     const messages = [
       {
         role: "system",
-        content: getSystemPrompt(mode),
+        content: getSystemPrompt(mode, deepSolve),
       },
     ];
 
@@ -402,19 +805,34 @@
     if (cleanQuestion) {
       finalUserMessage += `Latest user question/instruction:\n${cleanQuestion}\n\n`;
     } else {
-      finalUserMessage += "No typed question was provided. Identify the main useful question from the page context and answer it.\n\n";
+      finalUserMessage += "No typed question was provided. Identify the main coding problem from the page context and solve it.\n\n";
     }
 
     if (usePageContext && cleanPageText) {
       finalUserMessage += `Current webpage context:\n${cleanPageText}\n\n`;
     }
 
+    finalUserMessage += `Estimated difficulty: ${difficulty}.\n\n`;
+
     if (mode === "code") {
-      finalUserMessage += "Output format: raw final code only when code is needed. No explanation. No markdown.";
+      finalUserMessage += [
+        "Task:",
+        "Return the final accepted solution code only.",
+        "The code must be complete and directly submittable.",
+        "Do not include comments.",
+        "Do not include explanation.",
+        "Do not include markdown.",
+        "Do not include dry run.",
+        "Do not include algorithm description.",
+        "Do not include incomplete helper functions.",
+        "Use the correct language/template from the problem context.",
+        "For LeetCode-style C++ problems, return only complete class Solution code.",
+        "For normal input/output problems, return a complete program with main().",
+      ].join("\n");
     } else if (mode === "answer") {
-      finalUserMessage += "Output format: short final answer only.";
+      finalUserMessage += "Output format: final answer first, then short key reasoning only if needed.";
     } else {
-      finalUserMessage += "Output format: brief explanation.";
+      finalUserMessage += "Output format: brief but complete explanation.";
     }
 
     messages.push({
@@ -425,69 +843,399 @@
     return messages;
   }
 
-  async function requestGroqWithKeyRotation(messages) {
+  function buildCodeOnlyRepairMessages({ bodyText, customQuestion, usePageContext, draftReply }) {
+    const cleanQuestion = String(customQuestion || "").trim();
+    const cleanPageText = String(bodyText || "").trim();
+    const cleanDraft = String(draftReply || "").trim();
+
+    const userPrompt = [
+      cleanQuestion
+        ? `Question/instruction:\n${cleanQuestion}`
+        : "Question/instruction:\nUse webpage context to infer the main DSA problem.",
+      usePageContext && cleanPageText ? `Relevant page context:\n${cleanPageText}` : "",
+      cleanDraft ? `Previous bad/incomplete/comment-heavy draft:\n${cleanDraft}` : "",
+      [
+        "Rewrite the answer now.",
+        "Return ONLY complete final source code.",
+        "No comments.",
+        "No explanation.",
+        "No markdown.",
+        "No pseudo-code.",
+        "No placeholders.",
+        "No incomplete code.",
+        "Code must compile.",
+      ].join("\n"),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    return [
+      {
+        role: "system",
+        content: [
+          "You are a strict competitive-programming code generator.",
+          "Output only complete final code.",
+          "Never output comments or explanation.",
+          "Never output markdown.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: userPrompt,
+      },
+    ];
+  }
+
+  function buildVerificationMessages({ bodyText, customQuestion, mode, usePageContext, draftReply }) {
+    const cleanQuestion = String(customQuestion || "").trim();
+    const cleanPageText = String(bodyText || "").trim();
+    const cleanDraft = String(draftReply || "").trim();
+
+    const verificationTask =
+      mode === "code"
+        ? [
+            "Verify correctness, edge cases, overflow, and constraints.",
+            "If the draft is wrong, incomplete, or comment-heavy, rewrite it fully.",
+            "Return ONLY final complete source code.",
+            "No comments.",
+            "No markdown.",
+            "No explanation.",
+          ].join("\n")
+        : "Verify the draft answer carefully. Correct any mistakes and return a concise but complete final answer.";
+
+    const userPrompt = [
+      cleanQuestion
+        ? `Question/instruction:\n${cleanQuestion}`
+        : "Question/instruction:\nUse webpage context to infer the main problem.",
+      usePageContext && cleanPageText ? `Relevant page context:\n${cleanPageText}` : "",
+      `Draft answer to review:\n${cleanDraft}`,
+      verificationTask,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    return [
+      {
+        role: "system",
+        content:
+          mode === "code"
+            ? [
+                "You are a senior competitive-programming reviewer.",
+                "Think silently.",
+                "Return only the corrected final code.",
+                "No comments.",
+                "No explanation.",
+                "No markdown.",
+              ].join(" ")
+            : [
+                "You are a strict answer verifier.",
+                "Reason silently to catch mistakes, then output the corrected final answer only.",
+              ].join(" "),
+      },
+      {
+        role: "user",
+        content: userPrompt,
+      },
+    ];
+  }
+
+  function classifyGeminiError(status, message) {
+    const text = String(message || "").toLowerCase();
+
+    const isRateOrQuota =
+      status === 429 ||
+      text.includes("resource_exhausted") ||
+      text.includes("quota") ||
+      text.includes("rate") ||
+      text.includes("too many requests");
+
+    const isInvalidKey =
+      (status === 400 || status === 401 || status === 403) &&
+      (text.includes("api key") ||
+        text.includes("key not valid") ||
+        text.includes("permission denied") ||
+        text.includes("unauthenticated") ||
+        text.includes("forbidden") ||
+        text.includes("auth"));
+
+    const isModelUnavailable =
+      (status === 400 || status === 404) &&
+      (text.includes("model") &&
+        (text.includes("not found") ||
+          text.includes("not supported") ||
+          text.includes("not available") ||
+          text.includes("unknown")));
+
+    const isBadRequest = status === 400 || text.includes("invalid argument");
+
+    return { isRateOrQuota, isInvalidKey, isModelUnavailable, isBadRequest };
+  }
+
+  function convertMessagesToGeminiPayload(
+    messages,
+    {
+      temperature = 0.2,
+      maxCompletionTokens = 1200,
+      thinkingBudget = -1,
+      enableThinkingConfig = true,
+    } = {}
+  ) {
+    const systemMessages = [];
+    const contents = [];
+
+    for (const item of Array.isArray(messages) ? messages : []) {
+      const role = String(item?.role || "").toLowerCase();
+      const text = String(item?.content || "").trim();
+      if (!text) continue;
+
+      if (role === "system") {
+        systemMessages.push(text);
+        continue;
+      }
+
+      if (role === "assistant") {
+        contents.push({
+          role: "model",
+          parts: [{ text }],
+        });
+        continue;
+      }
+
+      contents.push({
+        role: "user",
+        parts: [{ text }],
+      });
+    }
+
+    if (!contents.length) {
+      contents.push({
+        role: "user",
+        parts: [{ text: "Respond to the latest user question." }],
+      });
+    }
+
+    const generationConfig = {
+      temperature,
+      maxOutputTokens: maxCompletionTokens,
+    };
+
+    if (enableThinkingConfig) {
+      generationConfig.thinkingConfig = {
+        thinkingBudget,
+      };
+    }
+
+    const payload = {
+      contents,
+      generationConfig,
+    };
+
+    if (systemMessages.length) {
+      payload.systemInstruction = {
+        parts: [{ text: systemMessages.join("\n\n") }],
+      };
+    }
+
+    return payload;
+  }
+
+  function extractGeminiText(data) {
+    const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+    if (!candidates.length) return "";
+
+    const parts = Array.isArray(candidates[0]?.content?.parts) ? candidates[0].content.parts : [];
+    const text = parts
+      .map((part) => String(part?.text || ""))
+      .join("")
+      .trim();
+
+    return text;
+  }
+
+  function extractGroqText(data) {
+    return String(data?.choices?.[0]?.message?.content || "").trim();
+  }
+
+  function extractProviderText(provider, data) {
+    if (provider === "gemini") return extractGeminiText(data);
+    return extractGroqText(data);
+  }
+
+  async function requestGeminiWithKeyRotation(
+    messages,
+    { temperature = 0.2, maxCompletionTokens = 1200, thinkingBudget = -1 } = {}
+  ) {
+    if (!GEMINI_API_KEYS.length) {
+      throw new Error("No GEMINI API keys configured.");
+    }
+
+    if (!GEMINI_MODELS.length) {
+      throw new Error("No GEMINI models configured.");
+    }
+
+    if (activeGeminiKeyIndex >= GEMINI_API_KEYS.length) {
+      activeGeminiKeyIndex = 0;
+    }
+
+    if (activeGeminiModelIndex >= GEMINI_MODELS.length) {
+      activeGeminiModelIndex = 0;
+    }
+
+    let lastError = null;
+    const modelAttempts = GEMINI_MODELS.length;
+    const keyAttempts = GEMINI_API_KEYS.length;
+
+    for (let m = 0; m < modelAttempts; m += 1) {
+      const modelIndex = (activeGeminiModelIndex + m) % GEMINI_MODELS.length;
+      const modelName = GEMINI_MODELS[modelIndex];
+
+      for (let k = 0; k < keyAttempts; k += 1) {
+        const keyIndex = (activeGeminiKeyIndex + k) % GEMINI_API_KEYS.length;
+        const apiKey = GEMINI_API_KEYS[keyIndex];
+
+        const payload = convertMessagesToGeminiPayload(messages, {
+          temperature,
+          maxCompletionTokens,
+          thinkingBudget,
+          enableThinkingConfig: /gemini-(2\.5|3)/.test(modelName),
+        });
+
+        let res;
+
+        try {
+          res = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+              modelName
+            )}:generateContent`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-goog-api-key": apiKey,
+              },
+              body: JSON.stringify(payload),
+            }
+          );
+        } catch (error) {
+          throw new Error(`Network error while contacting Gemini: ${error?.message || "Request failed"}`);
+        }
+
+        if (res.ok) {
+          activeGeminiKeyIndex = keyIndex;
+          activeGeminiModelIndex = modelIndex;
+          const data = await res.json();
+          return { data, modelName };
+        }
+
+        const err = await res.json().catch(() => ({}));
+        const message = err?.error?.message || `API error ${res.status}`;
+        const kind = classifyGeminiError(res.status, message);
+        lastError = new Error(`Gemini model ${modelName}, key ${keyIndex + 1} failed: ${message}`);
+
+        if (kind.isRateOrQuota || kind.isInvalidKey) {
+          activeGeminiKeyIndex = (keyIndex + 1) % GEMINI_API_KEYS.length;
+          continue;
+        }
+
+        if (kind.isModelUnavailable) {
+          activeGeminiModelIndex = (modelIndex + 1) % GEMINI_MODELS.length;
+          break;
+        }
+
+        if (kind.isBadRequest) {
+          throw new Error(`Gemini request configuration error for model ${modelName}: ${message}`);
+        }
+
+        throw new Error(`Gemini request failed for model ${modelName}, key ${keyIndex + 1}: ${message}`);
+      }
+    }
+
+    throw new Error(lastError?.message || "All configured Gemini keys/models failed.");
+  }
+
+  async function requestGroqWithKeyRotation(
+    messages,
+    { temperature = 0.2, maxCompletionTokens = 1200 } = {}
+  ) {
     if (!GROQ_API_KEYS.length) {
       throw new Error("No GROQ API keys configured.");
+    }
+
+    if (!GROQ_MODELS.length) {
+      throw new Error("No GROQ models configured.");
     }
 
     if (activeGroqKeyIndex >= GROQ_API_KEYS.length) {
       activeGroqKeyIndex = 0;
     }
 
+    if (activeGroqModelIndex >= GROQ_MODELS.length) {
+      activeGroqModelIndex = 0;
+    }
+
     let lastError = null;
+    const modelAttempts = GROQ_MODELS.length;
+    const keyAttempts = GROQ_API_KEYS.length;
 
-    for (let attempt = 0; attempt < GROQ_API_KEYS.length; attempt += 1) {
-      const keyIndex = (activeGroqKeyIndex + attempt) % GROQ_API_KEYS.length;
-      const apiKey = GROQ_API_KEYS[keyIndex];
+    for (let m = 0; m < modelAttempts; m += 1) {
+      const modelIndex = (activeGroqModelIndex + m) % GROQ_MODELS.length;
+      const modelName = GROQ_MODELS[modelIndex];
 
-      let res;
+      for (let k = 0; k < keyAttempts; k += 1) {
+        const keyIndex = (activeGroqKeyIndex + k) % GROQ_API_KEYS.length;
+        const apiKey = GROQ_API_KEYS[keyIndex];
 
-      try {
-        res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify({
-            model: GROQ_MODEL,
-            messages,
-            max_tokens: 1200,
-            temperature: 0.2,
-          }),
-        });
-      } catch (error) {
-        throw new Error(`Network error while contacting Groq: ${error?.message || "Request failed"}`);
-      }
+        let res;
 
-      if (res.ok) {
-        activeGroqKeyIndex = keyIndex;
-        return res.json();
-      }
+        try {
+          res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify({
+              model: modelName,
+              messages,
+              max_completion_tokens: maxCompletionTokens,
+              temperature,
+            }),
+          });
+        } catch (error) {
+          throw new Error(`Network error while contacting Groq: ${error?.message || "Request failed"}`);
+        }
 
-      const err = await res.json().catch(() => ({}));
-      const message = err?.error?.message || `API error ${res.status}`;
-      const kind = classifyGroqError(res.status, message);
+        if (res.ok) {
+          activeGroqKeyIndex = keyIndex;
+          activeGroqModelIndex = modelIndex;
+          const data = await res.json();
+          return { data, modelName };
+        }
 
-      if (kind.isRateOrQuota || kind.isInvalidKey) {
-        lastError = new Error(`Key ${keyIndex + 1} failed: ${message}`);
+        const err = await res.json().catch(() => ({}));
+        const message = err?.error?.message || `API error ${res.status}`;
+        const kind = classifyGroqError(res.status, message);
+        lastError = new Error(`Model ${modelName}, key ${keyIndex + 1} failed: ${message}`);
 
-        if (attempt < GROQ_API_KEYS.length - 1) {
+        if (kind.isRateOrQuota || kind.isInvalidKey) {
           activeGroqKeyIndex = (keyIndex + 1) % GROQ_API_KEYS.length;
           continue;
         }
 
-        throw new Error(`All configured keys are exhausted or invalid. Last error: ${message}`);
-      }
+        if (kind.isModelUnavailable) {
+          activeGroqModelIndex = (modelIndex + 1) % GROQ_MODELS.length;
+          break;
+        }
 
-      if (kind.isBadRequestOrModel) {
-        throw new Error(`Request configuration error (no key switch): ${message}`);
-      }
+        if (kind.isBadRequest) {
+          throw new Error(`Request configuration error for model ${modelName}: ${message}`);
+        }
 
-      throw new Error(`Groq request failed on key ${keyIndex + 1}: ${message}`);
+        throw new Error(`Groq request failed for model ${modelName}, key ${keyIndex + 1}: ${message}`);
+      }
     }
 
-    throw new Error(lastError?.message || "All configured Groq keys failed.");
+    throw new Error(lastError?.message || "All configured Groq keys/models failed.");
   }
 
   function addToChatHistory(question, answer) {
@@ -527,6 +1275,33 @@
     updateCopyButton(panel, "", "sr-answer");
   }
 
+  function isLikelyIncompleteCode(reply) {
+    const clean = String(reply || "").trim();
+    if (!clean) return true;
+
+    if (clean.endsWith("//")) return true;
+    if (clean.endsWith("/*")) return true;
+    if (clean.endsWith(",")) return true;
+    if (clean.endsWith("=")) return true;
+    if (clean.endsWith("return")) return true;
+    if (clean.endsWith("if")) return true;
+    if (clean.endsWith("for")) return true;
+    if (clean.endsWith("while")) return true;
+
+    if (detectCodeLanguage(clean) === "cpp") {
+      if (getBracketDelta(clean, "{", "}") !== 0) return true;
+      if (/\bclass\s+Solution\b/.test(clean) && !clean.includes("};")) return true;
+    }
+
+    return false;
+  }
+
+  function isGeminiOutputCutOff(data) {
+    const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+    const reason = String(candidates?.[0]?.finishReason || "").toUpperCase();
+    return reason === "MAX_TOKENS";
+  }
+
   async function runAsk(panel) {
     if (!panel || STATE.isLoading) return;
 
@@ -535,14 +1310,17 @@
     const inputEl = panel.querySelector("#sr-question-input");
     const modeEl = panel.querySelector("#sr-mode-select");
     const usePageEl = panel.querySelector("#sr-use-page-context");
+    const deepSolveEl = panel.querySelector("#sr-deep-solve");
 
     const customQuestion = String(inputEl?.value || "").trim();
     const mode = String(modeEl?.value || "code");
     const usePageContext = Boolean(usePageEl?.checked);
+    const deepSolve = deepSolveEl?.checked !== false;
 
     STATE.questionText = customQuestion;
     STATE.mode = mode;
     STATE.usePageContext = usePageContext;
+    STATE.deepSolve = deepSolve;
     STATE.isLoading = true;
     STATE.answerText = "";
     STATE.answerClass = "sr-answer sr-loading";
@@ -561,19 +1339,116 @@
 
     updateCopyButton(panel, "", "sr-answer sr-loading");
 
-    const bodyText = usePageContext ? getBodyText().slice(0, 7000) : "";
+    const rawBodyText = usePageContext ? getBodyText() : "";
+    const selectedText = usePageContext ? getSelectedText() : "";
+    const bodyText = usePageContext
+      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
+      : "";
+    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
+    const runVerificationPass = shouldRunDeepSolve({
+      deepSolve,
+      mode,
+      customQuestion,
+      difficulty,
+    });
+    const provider = deepSolve ? "gemini" : "groq";
+
     const messages = buildMessages({
       bodyText,
       customQuestion,
       mode,
       usePageContext,
+      deepSolve,
+      difficulty,
     });
 
     try {
-      const data = await requestGroqWithKeyRotation(messages);
+      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
+        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
+      }
 
-      let reply = data.choices?.[0]?.message?.content || "No response.";
-      reply = reply.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+      const firstPass =
+        provider === "gemini"
+          ? await requestGeminiWithKeyRotation(messages, {
+              temperature: mode === "code" ? 0.1 : 0.2,
+              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
+              thinkingBudget: getGeminiThinkingBudget(difficulty, mode, false),
+            })
+          : await requestGroqWithKeyRotation(messages, {
+              temperature: mode === "code" ? 0.1 : 0.2,
+              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
+            });
+
+      let reply = sanitizeReply(
+        extractProviderText(provider, firstPass.data) || "No response.",
+        mode
+      );
+
+      const firstPassCutOff =
+        provider === "gemini" && isGeminiOutputCutOff(firstPass.data);
+
+      if (
+        runVerificationPass ||
+        firstPassCutOff ||
+        isLowConfidenceReply(reply, mode) ||
+        (mode === "code" && isLikelyIncompleteCode(reply))
+      ) {
+        const verifyMessages = buildVerificationMessages({
+          bodyText,
+          customQuestion,
+          mode,
+          usePageContext,
+          draftReply: reply,
+        });
+
+        const secondPass =
+          provider === "gemini"
+            ? await requestGeminiWithKeyRotation(verifyMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
+                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
+              })
+            : await requestGroqWithKeyRotation(verifyMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
+              });
+
+        const verifiedReply = sanitizeReply(extractProviderText(provider, secondPass.data) || "", mode);
+
+        if (verifiedReply) {
+          reply = verifiedReply;
+        }
+      }
+
+      if (mode === "code" && !isCodeOnlyReplyValid(reply)) {
+        const repairMessages = buildCodeOnlyRepairMessages({
+          bodyText,
+          customQuestion,
+          usePageContext,
+          draftReply: reply,
+        });
+
+        const repairPass =
+          provider === "gemini"
+            ? await requestGeminiWithKeyRotation(repairMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
+                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
+              })
+            : await requestGroqWithKeyRotation(repairMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
+              });
+
+        const repairedReply = sanitizeReply(
+          extractProviderText(provider, repairPass.data) || "",
+          mode
+        );
+
+        if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
+          reply = repairedReply;
+        }
+      }
 
       const liveAnswerEl = document.getElementById("sr-answer");
 
@@ -694,6 +1569,11 @@
             page
           </label>
 
+          <label class="sr-check-label" title="Use Gemini deep reasoning for medium/hard questions">
+            <input type="checkbox" id="sr-deep-solve" />
+            deep (gemini)
+          </label>
+
           <select id="sr-mode-select" class="sr-mode-select" title="Answer mode">
             <option value="code">code only</option>
             <option value="answer">short answer</option>
@@ -729,11 +1609,13 @@
     const inputEl = panel.querySelector("#sr-question-input");
     const modeEl = panel.querySelector("#sr-mode-select");
     const usePageEl = panel.querySelector("#sr-use-page-context");
+    const deepSolveEl = panel.querySelector("#sr-deep-solve");
 
     if (answerEl && STATE.answerText) answerEl.textContent = STATE.answerText;
     if (inputEl) inputEl.value = STATE.questionText || "";
     if (modeEl) modeEl.value = STATE.mode || "code";
     if (usePageEl) usePageEl.checked = STATE.usePageContext !== false;
+    if (deepSolveEl) deepSolveEl.checked = STATE.deepSolve !== false;
 
     updateCopyButton(panel, STATE.answerText, STATE.answerClass);
 
@@ -809,6 +1691,11 @@
       persistUiState();
     });
 
+    deepSolveEl?.addEventListener("change", () => {
+      STATE.deepSolve = deepSolveEl.checked;
+      persistUiState();
+    });
+
     inputEl?.addEventListener("keydown", async (e) => {
       if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
@@ -870,3 +1757,4 @@
     return true;
   });
 })();
+
