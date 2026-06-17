@@ -370,9 +370,10 @@
   padding: 6px 10px 8px;
 
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 5px;
 
   border-top: 1px solid rgba(160, 160, 160, 0.12);
   background: rgba(255, 255, 255, 0.015);
@@ -410,6 +411,11 @@
   border: none;
 
   opacity: 0.68;
+}
+
+/* Paste code button – sits next to copy, no left push */
+#sr-paste-btn {
+  margin-right: 0;
 }
 
 .sr-copy-btn:hover {

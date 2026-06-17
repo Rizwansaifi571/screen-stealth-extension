@@ -1,0 +1,10 @@
+window.ENV = {
+  GROQ_API_KEYS: [
+    "YOUR_GROQ_API_KEY_1", 
+    "YOUR_GROQ_API_KEY_2"
+  ],
+  GEMINI_API_KEYS: [
+    "YOUR_GEMINI_API_KEY_1",
+    "YOUR_GEMINI_API_KEY_2"
+  ]
+};

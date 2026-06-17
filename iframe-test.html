@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 15px;
+      background: #fdfbf7;
+    }
+    textarea {
+      width: 100%;
+      height: 100px;
+      padding: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 14px;
+      box-sizing: border-box;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      resize: vertical;
+    }
+    .unselectable {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .warning {
+      color: #b91c1c;
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body class="unselectable">
+  <div class="warning">Iframe Context (Strict Isolation)</div>
+  <textarea id="iframe-ta" placeholder="Paste blocked inside iframe..."></textarea>
+
+  <script>
+    // Iframe specific blockers
+    document.addEventListener('contextmenu', e => e.preventDefault(), true);
+    
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'v' || e.key.toLowerCase() === 'c')) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    }, true);
+
+    document.addEventListener('paste', e => {
+      e.preventDefault();
+      e.stopPropagation();
+      
+      const ta = document.getElementById('iframe-ta');
+      const originalBg = ta.style.background;
+      ta.style.background = '#450a0a'; // flash red
+      setTimeout(() => ta.style.background = originalBg, 500);
+    }, true);
+  </script>
+</body>
+</html>

@@ -3,12 +3,7 @@
   if (window.__screenReaderExtensionLoaded) return;
   window.__screenReaderExtensionLoaded = true;
 
-  const GROQ_API_KEYS = [
-    "", 
-    "", 
-    "" 
-    // Add more keys below. Empty strings are ignored.
-  ].filter(Boolean);
+  const GROQ_API_KEYS = (window.ENV?.GROQ_API_KEYS || []).filter(Boolean);
 
   const GROQ_MODELS = [
     // Try stronger model first for better medium/hard question solving.
@@ -16,12 +11,7 @@
     "meta-llama/llama-4-scout-17b-16e-instruct",
   ];
 
-  const GEMINI_API_KEYS = [
-    // Paste one or many Gemini API keys here. Empty strings are ignored.
-    "",
-    "",
-    ""
-  ].filter(Boolean);
+  const GEMINI_API_KEYS = (window.ENV?.GEMINI_API_KEYS || []).filter(Boolean);
 
   const GEMINI_MODELS = [
     // Prioritize strongest reasoning model first, then faster/cheaper fallbacks.
@@ -656,6 +646,197 @@
     return value.trim();
   }
 
+  // Force-insert text into any element (input, textarea, contenteditable, code editors)
+  function forceInsertText(el, text) {
+    if (!el || !text) return false;
+
+    // Standard input/textarea
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? el.value.length;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+
+      // Use native setter to bypass React/Angular controlled input guards
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(el).__proto__, "value"
+      )?.set || Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set
+            || Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+
+      if (nativeSetter) {
+        nativeSetter.call(el, before + text + after);
+      } else {
+        el.value = before + text + after;
+      }
+
+      const newCursor = start + text.length;
+      el.selectionStart = newCursor;
+      el.selectionEnd = newCursor;
+
+      el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+      return true;
+    }
+
+    // ContentEditable elements (rich text editors, CodeMirror, Monaco, etc.)
+    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      el.focus();
+
+      // Try execCommand first
+      try {
+        const success = document.execCommand("insertText", false, text);
+        if (success) return true;
+      } catch (_) {}
+
+      // Fallback: Selection API
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        range.deleteContents();
+        const textNode = document.createTextNode(text);
+        range.insertNode(textNode);
+        range.setStartAfter(textNode);
+        range.setEndAfter(textNode);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+        return true;
+      }
+
+      el.textContent += text;
+      el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+      return true;
+    }
+
+    // For CodeMirror / Monaco – try to find the underlying editor instance
+    // CodeMirror 6
+    const cmView = el.closest && el.closest(".cm-editor");
+    if (cmView && cmView.cmView?.view) {
+      try {
+        const view = cmView.cmView.view;
+        const { from, to } = view.state.selection.main;
+        view.dispatch({ changes: { from, to, insert: text } });
+        return true;
+      } catch (_) {}
+    }
+
+    // Monaco editor
+    const monacoEl = el.closest && el.closest(".monaco-editor");
+    if (monacoEl) {
+      try {
+        const monacoWidget = monacoEl.querySelector(".inputarea, textarea");
+        if (monacoWidget) {
+          monacoWidget.focus();
+          const success = document.execCommand("insertText", false, text);
+          if (success) return true;
+        }
+      } catch (_) {}
+    }
+
+    return false;
+  }
+
+  // Find the best element to paste code into on OA platforms
+  function findBestPasteTarget() {
+    // Helper to get active element even inside shadow DOMs
+    function getDeepActiveElement() {
+      let active = document.activeElement;
+      while (active && active.shadowRoot && active.shadowRoot.activeElement) {
+        active = active.shadowRoot.activeElement;
+      }
+      return active;
+    }
+
+    // 1. Check if activeElement is a valid target (user clicked into an editor)
+    const active = getDeepActiveElement();
+    if (active && active.id !== "__sr-panel" && !active.closest("#__sr-panel")) {
+      if (
+        active.tagName === "TEXTAREA" ||
+        (active.tagName === "INPUT" && active.type !== "hidden") ||
+        active.isContentEditable
+      ) {
+        return active;
+      }
+    }
+
+    // Traverse shadow DOMs to find editors
+    function queryDeep(selector) {
+      let found = document.querySelector(selector);
+      if (found) return found;
+      
+      const allElements = document.querySelectorAll('*');
+      for (const el of allElements) {
+        if (el.shadowRoot) {
+          found = el.shadowRoot.querySelector(selector);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    // 2. CodeMirror 6 (e.g., LeetCode, HackerRank)
+    const cm6 = queryDeep(".cm-editor .cm-content[contenteditable]");
+    if (cm6) return cm6;
+
+    // 3. CodeMirror 5
+    const cm5 = queryDeep(".CodeMirror textarea");
+    if (cm5) return cm5;
+
+    // 4. Monaco editor (e.g., some coding platforms)
+    const monaco = queryDeep(".monaco-editor .inputarea, .monaco-editor textarea");
+    if (monaco) return monaco;
+
+    // 5. ACE editor
+    const ace = queryDeep(".ace_editor textarea");
+    if (ace) return ace;
+
+    // 6. Any large textarea (likely the code input)
+    let largeTA = null;
+    let maxSize = 0;
+    
+    function scanForLargeTextareas(root) {
+      const textareas = root.querySelectorAll("textarea:not(#sr-question-input)");
+      for (const ta of textareas) {
+        if (ta.closest && ta.closest("#__sr-panel")) continue;
+        const size = ta.offsetHeight * ta.offsetWidth;
+        if (size > maxSize) {
+          maxSize = size;
+          largeTA = ta;
+        }
+      }
+      
+      // Check shadow roots
+      const allElements = root.querySelectorAll('*');
+      for (const el of allElements) {
+        if (el.shadowRoot) {
+          scanForLargeTextareas(el.shadowRoot);
+        }
+      }
+    }
+    
+    scanForLargeTextareas(document);
+    if (largeTA) return largeTA;
+
+    // 7. Any contenteditable element
+    function scanForContentEditable(root) {
+      const editables = root.querySelectorAll("[contenteditable=true]");
+      for (const el of editables) {
+        if (!el.closest || !el.closest("#__sr-panel")) return el;
+      }
+      
+      const allElements = root.querySelectorAll('*');
+      for (const el of allElements) {
+        if (el.shadowRoot) {
+          const found = scanForContentEditable(el.shadowRoot);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    return scanForContentEditable(document);
+  }
+
   async function copyTextToClipboard(text) {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
@@ -677,12 +858,14 @@
     if (!panel) return;
 
     const copyBtn = panel.querySelector("#sr-copy-btn");
+    const pasteBtn = panel.querySelector("#sr-paste-btn");
     if (!copyBtn) return;
 
     const hasAnswer = answerClass === "sr-answer" && String(answerText || "").trim();
 
     if (!hasAnswer) {
       copyBtn.style.display = "none";
+      if (pasteBtn) pasteBtn.style.display = "none";
       copyBtn.dataset.copyText = "";
       copyBtn.textContent = "copy";
       return;
@@ -695,6 +878,14 @@
     copyBtn.dataset.copyText = copyText;
     copyBtn.dataset.copyLang = language || "answer";
     copyBtn.textContent = language ? "copy code" : "copy";
+
+    // Show paste button for code answers
+    if (pasteBtn && language) {
+      pasteBtn.style.display = "inline-block";
+      pasteBtn.dataset.pasteText = copyText;
+    } else if (pasteBtn) {
+      pasteBtn.style.display = "none";
+    }
   }
 
   function classifyGroqError(status, message) {
@@ -1584,6 +1775,7 @@
 
       <div class="sr-footer">
         <button class="sr-copy-btn" id="sr-copy-btn" style="display:none;">copy</button>
+        <button class="sr-copy-btn" id="sr-paste-btn" style="display:none;" title="Force-paste code into the active editor field">paste code</button>
         <button class="sr-clear-btn" id="sr-clear-btn">clear</button>
         <button class="sr-ask-btn" id="sr-ask-btn">ask</button>
       </div>
@@ -1664,6 +1856,73 @@
           }
         }, 900);
       }
+    });
+
+    panel.querySelector("#sr-paste-btn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+
+      const pasteBtn = panel.querySelector("#sr-paste-btn");
+      const textToPaste = pasteBtn?.dataset?.pasteText || "";
+      if (!textToPaste) return;
+
+      // First copy to clipboard
+      try {
+        await copyTextToClipboard(textToPaste);
+      } catch (_) {}
+
+      // Temporarily minimize the panel to reveal the editor underneath
+      panel.style.opacity = "0.05";
+      panel.style.pointerEvents = "none";
+
+      // Try to find the best target element on the page
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const target = findBestPasteTarget();
+
+      if (target) {
+        target.focus();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        let pasted = forceInsertText(target, textToPaste);
+
+        if (!pasted) {
+          // Fallback 1: Try execCommand paste since we just copied to clipboard
+          try {
+            if (document.execCommand("paste")) pasted = true;
+          } catch (_) {}
+        }
+
+        if (!pasted) {
+          // Fallback 2: Synthetic paste event
+          try {
+            const dt = new DataTransfer();
+            dt.setData("text/plain", textToPaste);
+            
+            // Dispatch to both the target and its parent (some editors listen on the wrapper)
+            const pasteEvent = new ClipboardEvent("paste", {
+              bubbles: true,
+              cancelable: true,
+              clipboardData: dt,
+            });
+            
+            target.dispatchEvent(pasteEvent);
+            pasted = true; // Assume success if dispatch didn't throw
+          } catch (_) {}
+        }
+
+        pasteBtn.textContent = pasted ? "pasted ✓" : "use ctrl+v";
+      } else {
+        pasteBtn.textContent = "copied – click editor & ctrl+v";
+      }
+
+      // Restore panel
+      panel.style.opacity = "";
+      panel.style.pointerEvents = "";
+
+      setTimeout(() => {
+        const liveBtn = document.getElementById("sr-paste-btn");
+        if (liveBtn) liveBtn.textContent = "paste code";
+      }, 1500);
     });
 
     panel.querySelector("#sr-clear-btn")?.addEventListener("click", (e) => {

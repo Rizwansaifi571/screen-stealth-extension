@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ultimate OA Paste Blocker Test</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f3f4f6;
+      color: #111827;
+    }
+    h1 { font-size: 26px; margin-bottom: 5px; }
+    p { margin-bottom: 25px; color: #4b5563; font-size: 15px; }
+    
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    
+    .editor-container {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      position: relative;
+    }
+    
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 8px;
+      font-size: 14px;
+      color: #374151;
+    }
+    
+    textarea, input[type="text"], .ce-editor {
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-family: monospace;
+      font-size: 14px;
+      box-sizing: border-box;
+      background: #1e1e1e;
+      color: #d4d4d4;
+    }
+    
+    textarea, .ce-editor {
+      height: 100px;
+      resize: vertical;
+      overflow-y: auto;
+    }
+    
+    .ce-editor:empty:before {
+      content: attr(placeholder);
+      color: #6b7280;
+    }
+    
+    .status {
+      padding: 8px;
+      margin-top: 10px;
+      border-radius: 4px;
+      background: #fee2e2;
+      color: #991b1b;
+      font-size: 12px;
+      font-weight: 500;
+      opacity: 0;
+      transition: opacity 0.2s;
+      position: absolute;
+      bottom: -10px;
+      left: 20px;
+      right: 20px;
+      transform: translateY(100%);
+      z-index: 10;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    
+    .status.show {
+      opacity: 1;
+    }
+    
+    /* Simulate user-select block */
+    .unselectable {
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    /* Question Container */
+    .question-container {
+      background: white;
+      padding: 24px;
+      border-radius: 8px;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      margin-bottom: 30px;
+      border-left: 4px solid #3b82f6;
+    }
+
+    .question-container h2 {
+      margin-top: 0;
+      font-size: 20px;
+      color: #1f2937;
+    }
+
+    .question-container code {
+      background: #f3f4f6;
+      padding: 2px 4px;
+      border-radius: 4px;
+      font-family: monospace;
+      color: #ef4444;
+    }
+
+    .question-container pre {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 12px;
+      border-radius: 6px;
+      overflow-x: auto;
+    }
+
+    iframe {
+      width: 100%;
+      height: 180px;
+      border: none;
+      border-radius: 6px;
+      background: #fff;
+      border: 1px solid #d1d5db;
+    }
+    
+    /* Global toast */
+    #global-toast {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: #dc2626;
+      color: white;
+      padding: 12px 20px;
+      border-radius: 6px;
+      font-weight: bold;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+      transform: translateX(150%);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      z-index: 9999;
+    }
+    #global-toast.show {
+      transform: translateX(0);
+    }
+  </style>
+</head>
+<body class="unselectable">
+
+  <div id="global-toast">Action Blocked</div>
+
+  <h1>Ultimate OA Paste Blocker Test</h1>
+  <p>This harness includes capture-phase blocking, shadow DOM, iframes, contenteditables, and dynamic React-style inputs.</p>
+
+  <div class="question-container">
+    <h2>Problem 1: Maximum Subarray Sum</h2>
+    <p>Given an integer array <code>nums</code>, find the contiguous subarray (containing at least one number) which has the largest sum and return its sum.</p>
+    <p><strong>Example 1:</strong></p>
+    <pre><code>Input: nums = [-2,1,-3,4,-1,2,1,-5,4]
+Output: 6
+Explanation: [4,-1,2,1] has the largest sum = 6.</code></pre>
+    <p><strong>Constraints:</strong></p>
+    <ul>
+      <li><code>1 <= nums.length <= 10^5</code></li>
+      <li><code>-10^4 <= nums[i] <= 10^4</code></li>
+    </ul>
+    <p><em>Note: Your extension should be able to read this question from the page, generate the solution, and then you can test pasting it below.</em></p>
+  </div>
+
+  <div class="grid">
+    
+    <!-- 1. Capture-Phase + Bubbling Block -->
+    <div class="editor-container">
+      <label>1. Standard Textarea (Capture-Phase Block)</label>
+      <textarea id="strict-textarea" placeholder="Bubbling & Capture phase paste blocked..."></textarea>
+      <div id="alert-1" class="status">⚠️ Paste blocked by capture-phase listener!</div>
+    </div>
+
+    <!-- 2. Inline attributes -->
+    <div class="editor-container">
+      <label>2. Inline Attribute Block</label>
+      <input type="text" id="inline-input" onpaste="showToast('Inline paste blocked!'); return false;" ondrop="return false;" placeholder="onpaste='return false;'">
+    </div>
+
+    <!-- 3. ContentEditable -->
+    <div class="editor-container">
+      <label>3. ContentEditable Div</label>
+      <div contenteditable="true" id="ce-editor" class="ce-editor" placeholder="Rich text editor block..."></div>
+      <div id="alert-ce" class="status">⚠️ Paste blocked on ContentEditable!</div>
+    </div>
+
+    <!-- 4. Shadow DOM -->
+    <div class="editor-container">
+      <label>4. Shadow DOM Editor</label>
+      <div id="shadow-host"></div>
+      <div id="alert-shadow" class="status">⚠️ Paste blocked inside Shadow DOM!</div>
+    </div>
+
+    <!-- 5. React-style Controlled Input -->
+    <div class="editor-container">
+      <label>5. React Controlled Input (Blocks native setter)</label>
+      <textarea id="react-input" placeholder="State-controlled input..."></textarea>
+      <div id="alert-react" class="status">⚠️ Paste blocked by React simulator!</div>
+    </div>
+
+    <!-- 6. Readonly / Disabled (Extension should ignore) -->
+    <div class="editor-container">
+      <label>6. Readonly Textarea (Should not be modified)</label>
+      <textarea readonly placeholder="This is readonly. Extension should not paste here."></textarea>
+    </div>
+
+    <!-- 7. Dynamic Elements (Inserted after 3s) -->
+    <div class="editor-container" id="dynamic-container">
+      <label>7. Dynamic Element (Loads in 3s)</label>
+      <p style="font-size: 13px; color: #666;" id="dynamic-loading">Waiting 3 seconds...</p>
+    </div>
+
+    <!-- 8. Iframe Test -->
+    <div class="editor-container" style="grid-column: 1 / -1;">
+      <label>8. Cross-context Iframe</label>
+      <iframe src="iframe-test.html"></iframe>
+    </div>
+
+  </div>
+
+  <script>
+    function showToast(msg) {
+      const toast = document.getElementById('global-toast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2500);
+    }
+
+    function showLocalAlert(id) {
+      const el = document.getElementById(id);
+      if(!el) return;
+      el.classList.add('show');
+      setTimeout(() => el.classList.remove('show'), 2000);
+    }
+
+    // --- Global Blockers ---
+
+    // Block right click everywhere
+    document.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      showToast("Right-click is disabled!");
+    }, true);
+
+    // Capture-phase paste block (Global)
+    document.addEventListener("paste", e => {
+      // Don't block the readonly one so we can see if the extension ignores it properly
+      if (e.target.readOnly) return; 
+      
+      e.preventDefault();
+      e.stopPropagation();
+      showToast("Global capture-phase paste block!");
+    }, true);
+
+    // Ctrl+V / Cmd+V interception
+    document.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'v')) {
+        e.preventDefault();
+        e.stopPropagation();
+        showToast("Ctrl+V intercepted!");
+      }
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'c')) {
+        e.preventDefault();
+        showToast("Ctrl+C intercepted!");
+      }
+    }, true);
+
+    // Block drag/drop globally
+    document.addEventListener("drop", e => {
+      e.preventDefault();
+      showToast("Drag and drop disabled!");
+    }, true);
+    document.addEventListener("dragover", e => e.preventDefault(), true);
+
+
+    // --- Specific Element Blockers ---
+
+    // 1. Textarea
+    const strictTa = document.getElementById('strict-textarea');
+    strictTa.addEventListener('paste', e => {
+      e.preventDefault();
+      showLocalAlert('alert-1');
+    });
+
+    // 3. ContentEditable
+    const ce = document.getElementById('ce-editor');
+    ce.addEventListener('paste', e => {
+      e.preventDefault();
+      showLocalAlert('alert-ce');
+    });
+
+    // 4. Shadow DOM
+    const shadowHost = document.getElementById('shadow-host');
+    const shadow = shadowHost.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `
+      <style>
+        textarea {
+          width: 100%; padding: 12px; border: 1px solid #d1d5db; 
+          border-radius: 6px; font-family: monospace; font-size: 14px; 
+          box-sizing: border-box; background: #1e1e1e; color: #d4d4d4; 
+          height: 100px; resize: vertical;
+        }
+      </style>
+      <textarea id="shadow-ta" placeholder="Inside shadow root..."></textarea>
+    `;
+    shadow.querySelector('#shadow-ta').addEventListener('paste', e => {
+      e.preventDefault();
+      showLocalAlert('alert-shadow');
+    });
+
+    // 5. React Controlled Input Simulator
+    // In React, controlled inputs override the native value setter and track state.
+    // If you bypass the setter, React just overwrites it on the next render unless you fire events.
+    const reactTa = document.getElementById('react-input');
+    let reactState = "";
+    
+    // Sabotage the native setter
+    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+    Object.defineProperty(reactTa, "value", {
+      get() { return reactState; },
+      set(v) { 
+        // A naive extension might call el.value = "text". React ignores this if events aren't fired.
+        showLocalAlert('alert-react');
+        // We refuse to update the visual state unless a trusted event causes it (like real typing)
+      }
+    });
+    
+    // The only way to update our mock React state is via a trusted input event
+    reactTa.addEventListener('input', e => {
+      if (e.isTrusted || e.detail === 'synthetic_bypass') {
+        reactState = e.target.value; // In a real React app, state updates here
+      } else {
+        // Revert to state (simulating React's render cycle)
+        nativeSetter.call(reactTa, reactState);
+        showLocalAlert('alert-react');
+      }
+    });
+
+    // 7. Dynamic Element
+    setTimeout(() => {
+      document.getElementById('dynamic-loading').style.display = 'none';
+      const dynTa = document.createElement('textarea');
+      dynTa.placeholder = "Created dynamically after page load";
+      dynTa.onpaste = (e) => {
+        e.preventDefault();
+        showToast("Dynamic element paste blocked!");
+        return false;
+      };
+      document.getElementById('dynamic-container').appendChild(dynTa);
+    }, 3000);
+
+  </script>
+
+</body>
+</html>
