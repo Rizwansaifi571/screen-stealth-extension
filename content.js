@@ -1991,6 +1991,19 @@
       e.preventDefault();
       setWidgetHidden(!STATE.isWidgetHidden);
     }
+
+    // Alt+Shift+A - toggle ask panel open/closed (A = Ask)
+    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === "O") {
+      e.preventDefault();
+      const panel = document.getElementById("__sr-panel");
+      if (panel) {
+        document.removeEventListener("click", outsideClickHandler);
+        minimisePanel();
+      } else {
+        if (STATE.isWidgetHidden) setWidgetHidden(false);
+        expandPanel();
+      }
+    }
   });
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
