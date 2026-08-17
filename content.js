@@ -6,9 +6,8 @@
   const GROQ_API_KEYS = (window.ENV?.GROQ_API_KEYS || []).filter(Boolean);
 
   const GROQ_MODELS = [
-    // Try stronger model first for better medium/hard question solving.
-    "llama-3.3-70b-versatile",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "groq/compound-mini",
+    "groq/compound",
   ];
 
   const GEMINI_API_KEYS = (window.ENV?.GEMINI_API_KEYS || []).filter(Boolean);
