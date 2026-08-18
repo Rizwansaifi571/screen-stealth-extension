@@ -661,18 +661,42 @@
   }
 
   function getTypingDelay(ch) {
-    if (ch === "\n") return 70 + Math.floor(Math.random() * 90);
-    if (/[.,;:!?]/.test(ch)) return 28 + Math.floor(Math.random() * 50);
-    if (/[(){}\[\]]/.test(ch)) return 16 + Math.floor(Math.random() * 24);
-    if (ch === " ") return 12 + Math.floor(Math.random() * 14);
-    return 10 + Math.floor(Math.random() * 18);
+    if (ch === "\n") return 220 + Math.floor(Math.random() * 260); // Line break hesitation
+    if (/[.,;:!?]/.test(ch)) return 90 + Math.floor(Math.random() * 120); // Punctuation pause
+    if (/[(){}\[\]<>]/.test(ch)) return 70 + Math.floor(Math.random() * 90); // Syntax symbols
+    if (ch === " ") return 50 + Math.floor(Math.random() * 50); // Word gap
+    if (ch === "\t") return 70 + Math.floor(Math.random() * 80);
+    return 45 + Math.floor(Math.random() * 65); // Standard character
+  }
+
+  function normalizeGenericCodeLines(text) {
+    const rawLines = String(text || "")
+      .replace(/\t/g, "  ")
+      .replace(/\u00a0/g, " ")
+      .split("\n")
+      .map((line) => line.replace(/[ \t]+$/g, ""));
+
+    let minIndent = Infinity;
+    for (const line of rawLines) {
+      if (!line.trim()) continue;
+      const match = line.match(/^ +/);
+      const indent = match ? match[0].length : 0;
+      minIndent = Math.min(minIndent, indent);
+    }
+
+    const dedent = Number.isFinite(minIndent) ? minIndent : 0;
+    return rawLines.map((line) => {
+      if (!line.trim()) return "";
+      return dedent > 0 ? line.slice(Math.min(dedent, line.length)) : line;
+    });
   }
 
   function normalizeCodeFormatting(text) {
-    return String(text || "")
+    const lines = normalizeGenericCodeLines(text);
+    return lines
+      .join("\n")
       .replace(/\r\n?/g, "\n")
-      .replace(/[ \t]+$/gm, "")
-      .replace(/\n{4,}/g, "\n\n\n")
+      .replace(/\n{3,}/g, "\n\n") // Max 2 consecutive newlines
       .trim();
   }
 
@@ -692,26 +716,60 @@
     if (!el || !text) return { success: false, charsTyped: 0 };
 
     const content = normalizeCodeFormatting(text);
+    if (!content) return { success: false, charsTyped: 0 };
 
+    // Common code editors (Monaco/Ace/LeetCode) auto-indent on Enter
+    const isSmartEditor =
+      el.isContentEditable ||
+      el.getAttribute("contenteditable") === "true" ||
+      el.classList?.toString().toLowerCase().includes("monaco") ||
+      el.classList?.toString().toLowerCase().includes("ace");
+
+    /*
+    * ---------------------------------------------------------
+    * TEXTAREA / INPUT
+    * ---------------------------------------------------------
+    */
     if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
       el.focus();
 
-      let typed = "";
       let charsTyped = 0;
+      let atLineStart = false;
 
       for (let i = 0; i < content.length; i += 1) {
         const ch = content[i];
-        typed += ch;
-        charsTyped += 1;
 
-        const start = Number.isFinite(el.selectionStart) ? el.selectionStart : String(el.value || "").length;
-        const end = Number.isFinite(el.selectionEnd) ? el.selectionEnd : start;
+        // Skip extra source spaces right after \n if editor auto-indents
+        if (atLineStart && (ch === " " || ch === "\t")) {
+          continue;
+        }
+
+        atLineStart = ch === "\n";
+
+        const start = Number.isFinite(el.selectionStart)
+          ? el.selectionStart
+          : String(el.value || "").length;
+
+        const end = Number.isFinite(el.selectionEnd)
+          ? el.selectionEnd
+          : start;
+
         el.setRangeText(ch, start, end, "end");
 
-        el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+        charsTyped += 1;
 
-        if (i > 0 && i % 120 === 0) {
-          await sleep(140 + Math.floor(Math.random() * 220));
+        el.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            cancelable: true,
+            inputType: "insertText",
+            data: ch,
+          })
+        );
+
+        // Periodic human thinking pause (every ~50-80 chars)
+        if (charsTyped > 0 && charsTyped % (50 + Math.floor(Math.random() * 30)) === 0) {
+          await sleep(220 + Math.floor(Math.random() * 380));
         }
 
         await sleep(getTypingDelay(ch));
@@ -721,17 +779,34 @@
       return { success: charsTyped > 0, charsTyped };
     }
 
-    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+    /*
+    * ---------------------------------------------------------
+    * CONTENTEDITABLE (Monaco / Ace / Custom Web Editors)
+    * ---------------------------------------------------------
+    */
+    if (isSmartEditor) {
       el.focus();
+
       let charsTyped = 0;
+      let atLineStart = false;
 
       for (let i = 0; i < content.length; i += 1) {
         const ch = content[i];
+
+        // Skip leading spaces after newlines since smart editors auto-indent
+        if (atLineStart && (ch === " " || ch === "\t")) {
+          continue;
+        }
+
+        atLineStart = ch === "\n";
+
         let inserted = false;
 
         try {
           inserted = document.execCommand("insertText", false, ch);
-        } catch (_) {}
+        } catch (_) {
+          inserted = false;
+        }
 
         if (!inserted) {
           const selection = window.getSelection();
@@ -753,10 +828,19 @@
         }
 
         charsTyped += 1;
-        el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
 
-        if (i > 0 && i % 120 === 0) {
-          await sleep(140 + Math.floor(Math.random() * 220));
+        el.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            cancelable: true,
+            inputType: "insertText",
+            data: ch,
+          })
+        );
+
+        // Periodic human thinking pause
+        if (charsTyped > 0 && charsTyped % (50 + Math.floor(Math.random() * 30)) === 0) {
+          await sleep(220 + Math.floor(Math.random() * 380));
         }
 
         await sleep(getTypingDelay(ch));
