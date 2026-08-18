@@ -3,14 +3,17 @@
   if (window.__screenReaderExtensionLoaded) return;
   window.__screenReaderExtensionLoaded = true;
 
-  const GROQ_API_KEYS = (window.ENV?.GROQ_API_KEYS || []).filter(Boolean);
+  let GROQ_API_KEYS = [];
 
   const GROQ_MODELS = [
     "groq/compound-mini",
     "groq/compound",
   ];
 
-  const GEMINI_API_KEYS = (window.ENV?.GEMINI_API_KEYS || []).filter(Boolean);
+  let GEMINI_API_KEYS = [];
+
+  let apiKeysLoaded = false;
+  let apiKeysLoadPromise = null;
 
   const GEMINI_MODELS = [
     // Prioritize strongest reasoning model first, then faster/cheaper fallbacks.
@@ -99,6 +102,86 @@
     deepSolve: true,
     chatHistory: [],
   };
+
+  function normalizeKeyList(value) {
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    }
+
+    if (typeof value === "string") {
+      return value
+        .split(/[\n,]/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    return [];
+  }
+
+  function isPlaceholderKey(value) {
+    const key = String(value || "").trim().toLowerCase();
+    if (!key) return true;
+    return key.includes("your_") || key.includes("replace_") || key.includes("example") || key.includes("paste_");
+  }
+
+  function sanitizeKeys(value) {
+    return normalizeKeyList(value).filter((key) => !isPlaceholderKey(key));
+  }
+
+  function getEnvKeyConfig() {
+    return {
+      groq: sanitizeKeys(window.ENV?.GROQ_API_KEYS || []),
+      gemini: sanitizeKeys(window.ENV?.GEMINI_API_KEYS || []),
+    };
+  }
+
+  function readStorage(keys) {
+    return new Promise((resolve) => {
+      if (!chrome?.storage?.local) {
+        resolve({});
+        return;
+      }
+
+      try {
+        chrome.storage.local.get(keys, (result) => {
+          if (chrome.runtime?.lastError) {
+            resolve({});
+            return;
+          }
+          resolve(result || {});
+        });
+      } catch {
+        resolve({});
+      }
+    });
+  }
+
+  async function ensureApiKeysLoaded() {
+    if (apiKeysLoaded) return;
+
+    if (!apiKeysLoadPromise) {
+      apiKeysLoadPromise = (async () => {
+        const envConfig = getEnvKeyConfig();
+        const stored = await readStorage([
+          "groqApiKey",
+          "geminiApiKey",
+          "groqApiKeys",
+          "geminiApiKeys",
+        ]);
+
+        const storedGroq = sanitizeKeys(stored.groqApiKeys || stored.groqApiKey);
+        const storedGemini = sanitizeKeys(stored.geminiApiKeys || stored.geminiApiKey);
+
+        GROQ_API_KEYS = storedGroq.length ? storedGroq : envConfig.groq;
+        GEMINI_API_KEYS = storedGemini.length ? storedGemini : envConfig.gemini;
+        apiKeysLoaded = true;
+      })();
+    }
+
+    await apiKeysLoadPromise;
+  }
 
   function debugHotkeyLog(...args) {
     if (!HOTKEY_DEBUG) return;
@@ -935,6 +1018,8 @@
       debugHotkeyLog("ask skipped: assistant already loading");
       throw new Error("Assistant is already generating a response.");
     }
+
+    await ensureApiKeysLoaded();
 
     const mode = "code";
     const usePageContext = true;
@@ -1952,6 +2037,8 @@
 
   async function runAsk(panel) {
     if (!panel || STATE.isLoading) return;
+
+    await ensureApiKeysLoaded();
 
     const btn = panel.querySelector("#sr-ask-btn");
     const answerEl = panel.querySelector("#sr-answer");

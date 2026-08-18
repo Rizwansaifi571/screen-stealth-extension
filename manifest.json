@@ -5,6 +5,7 @@
   "description": "Reads page data and summarizes it with AI.",
   "permissions": [
     "activeTab",
+    "storage",
     "scripting",
     "clipboardRead",
     "clipboardWrite"

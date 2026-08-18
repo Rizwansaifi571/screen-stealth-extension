@@ -2,14 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Screen Reader</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { width: 240px; font-family: 'Segoe UI', sans-serif; background: #f0f0f0; color: #1a1a1a; }
+    body { width: 280px; font-family: 'Segoe UI', sans-serif; background: #f0f0f0; color: #1a1a1a; }
     .header { background: #444; color: white; padding: 14px 16px; }
     .header-title { font-size: 14px; font-weight: 700; }
     .header-sub { font-size: 11px; opacity: 0.65; margin-top: 2px; }
     .body { padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label { font-size: 11px; color: #444; font-weight: 600; }
+    .field textarea { width: 100%; min-height: 56px; resize: vertical; border: 1px solid #bbb; border-radius: 8px; padding: 8px; font-size: 11px; font-family: Consolas, monospace; background: #fff; }
     .btn { width: 100%; padding: 9px 12px; border-radius: 8px; border: none; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: all 0.15s; }
     .btn-primary { background: #444; color: white; }
     .btn-primary:hover { background: #222; }
@@ -29,6 +33,15 @@
   <div class="body">
     <button class="btn btn-primary" id="readBtn">📋 Log Body Text</button>
     <button class="btn btn-secondary" id="toggleBtn">◧ Toggle Panel</button>
+    <div class="field">
+      <label for="groqKeys">Groq API keys (one per line)</label>
+      <textarea id="groqKeys" placeholder="gsk_..."></textarea>
+    </div>
+    <div class="field">
+      <label for="geminiKeys">Gemini API keys (one per line)</label>
+      <textarea id="geminiKeys" placeholder="AIza..."></textarea>
+    </div>
+    <button class="btn btn-primary" id="saveKeysBtn">💾 Save API Keys</button>
     <div class="status" id="status">Ready</div>
   </div>
   <div class="footer">Open DevTools (F12) → Console to view logs</div>
