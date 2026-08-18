@@ -24,9 +24,15 @@
   let activeGroqModelIndex = 0;
   let activeGeminiKeyIndex = 0;
   let activeGeminiModelIndex = 0;
+  let isTypingCodeNow = false;
+  let isSmartHotkeyFlowRunning = false;
+  let lastTypeTriggerAt = 0;
+  let lastTypeSignature = "";
 
   const UI_STATE_KEY = "__sr_widget_ui_state_v2";
   const TOGGLE_HOTKEY_KEY = "H";
+  const SMART_ACTION_HOTKEY_KEY = "Q";
+  const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG !== false;
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
   const MAX_PAGE_CONTEXT_CHARS = 10000;
@@ -93,6 +99,11 @@
     deepSolve: true,
     chatHistory: [],
   };
+
+  function debugHotkeyLog(...args) {
+    if (!HOTKEY_DEBUG) return;
+    console.log("[SR-EXT HOTKEY]", ...args);
+  }
 
   function loadUiState() {
     try {
@@ -645,6 +656,358 @@
     return value.trim();
   }
 
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function getTypingDelay(ch) {
+    if (ch === "\n") return 70 + Math.floor(Math.random() * 90);
+    if (/[.,;:!?]/.test(ch)) return 28 + Math.floor(Math.random() * 50);
+    if (/[(){}\[\]]/.test(ch)) return 16 + Math.floor(Math.random() * 24);
+    if (ch === " ") return 12 + Math.floor(Math.random() * 14);
+    return 10 + Math.floor(Math.random() * 18);
+  }
+
+  function normalizeCodeFormatting(text) {
+    return String(text || "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+$/gm, "")
+      .replace(/\n{4,}/g, "\n\n\n")
+      .trim();
+  }
+
+  function isLikelyMcqContext(text) {
+    const value = String(text || "").toLowerCase();
+    if (!value) return false;
+
+    if (/\b(multiple\s*choice|mcq|choose\s+the\s+correct|select\s+the\s+correct)\b/.test(value)) {
+      return true;
+    }
+
+    const optionRows = (value.match(/(^|\n)\s*(a|b|c|d|e)\s*[).:-]/g) || []).length;
+    return optionRows >= 3;
+  }
+
+  async function typeTextHumanLike(el, text) {
+    if (!el || !text) return { success: false, charsTyped: 0 };
+
+    const content = normalizeCodeFormatting(text);
+
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      el.focus();
+
+      let typed = "";
+      let charsTyped = 0;
+
+      for (let i = 0; i < content.length; i += 1) {
+        const ch = content[i];
+        typed += ch;
+        charsTyped += 1;
+
+        const start = Number.isFinite(el.selectionStart) ? el.selectionStart : String(el.value || "").length;
+        const end = Number.isFinite(el.selectionEnd) ? el.selectionEnd : start;
+        el.setRangeText(ch, start, end, "end");
+
+        el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+
+        if (i > 0 && i % 120 === 0) {
+          await sleep(140 + Math.floor(Math.random() * 220));
+        }
+
+        await sleep(getTypingDelay(ch));
+      }
+
+      el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+      return { success: charsTyped > 0, charsTyped };
+    }
+
+    if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      el.focus();
+      let charsTyped = 0;
+
+      for (let i = 0; i < content.length; i += 1) {
+        const ch = content[i];
+        let inserted = false;
+
+        try {
+          inserted = document.execCommand("insertText", false, ch);
+        } catch (_) {}
+
+        if (!inserted) {
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount > 0) {
+            const range = selection.getRangeAt(0);
+            range.deleteContents();
+            const node = document.createTextNode(ch);
+            range.insertNode(node);
+            range.setStartAfter(node);
+            range.setEndAfter(node);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            inserted = true;
+          }
+        }
+
+        if (!inserted) {
+          el.textContent = `${el.textContent || ""}${ch}`;
+        }
+
+        charsTyped += 1;
+        el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+
+        if (i > 0 && i % 120 === 0) {
+          await sleep(140 + Math.floor(Math.random() * 220));
+        }
+
+        await sleep(getTypingDelay(ch));
+      }
+
+      return { success: charsTyped > 0, charsTyped };
+    }
+
+    return { success: false, charsTyped: 0 };
+  }
+
+  function getLatestGeneratedCode() {
+    const current = String(STATE.answerText || "").trim();
+    if (current && detectCodeLanguage(current)) {
+      return extractCodeForCopy(current);
+    }
+
+    for (let i = STATE.chatHistory.length - 1; i >= 0; i -= 1) {
+      const answer = String(STATE.chatHistory[i]?.answer || "").trim();
+      if (!answer) continue;
+      if (detectCodeLanguage(answer)) return extractCodeForCopy(answer);
+    }
+
+    return "";
+  }
+
+  async function typeCodeIntoEditor(codeText) {
+    if (isTypingCodeNow) {
+      debugHotkeyLog("typing skipped: already in progress");
+      return { success: false, reason: "Typing already in progress." };
+    }
+
+    const textToType = normalizeCodeFormatting(codeText);
+    if (!textToType) {
+      return { success: false, reason: "No code available to type." };
+    }
+
+    const target = findBestPasteTarget();
+    if (!target) {
+      debugHotkeyLog("typing skipped: no editor target found");
+      return { success: false, reason: "No editor input found. Focus the coding editor first." };
+    }
+
+    debugHotkeyLog("typing target:", {
+      tag: target.tagName,
+      id: target.id || "",
+      className: target.className || "",
+      textLength: textToType.length,
+    });
+
+    const signature = `${target.tagName}:${target.className || ""}:${textToType.slice(0, 80)}`;
+    const now = Date.now();
+    if (signature === lastTypeSignature && now - lastTypeTriggerAt < 2200) {
+      debugHotkeyLog("typing skipped: duplicate signature within cooldown");
+      return { success: false, reason: "Ignored duplicate trigger." };
+    }
+    lastTypeSignature = signature;
+    lastTypeTriggerAt = now;
+
+    isTypingCodeNow = true;
+
+    try {
+      target.focus();
+      await sleep(60);
+
+      const typed = await typeTextHumanLike(target, textToType);
+      if (typed.success) {
+        debugHotkeyLog("typing done", typed);
+        return { success: true };
+      }
+
+      debugHotkeyLog("typing failed: editor blocked typed input");
+      return { success: false, reason: "Editor blocked typed input. Click editor and try shortcut again." };
+    } finally {
+      isTypingCodeNow = false;
+    }
+  }
+
+  function updateTypeButton(panel, message, resetDelayMs = 1400) {
+    const typeBtn = panel?.querySelector("#sr-type-btn");
+    if (!typeBtn) return;
+
+    typeBtn.textContent = message;
+    setTimeout(() => {
+      const liveBtn = document.getElementById("sr-type-btn");
+      if (liveBtn) liveBtn.textContent = "type code";
+    }, resetDelayMs);
+  }
+
+  async function runHeadlessAskForCode() {
+    if (STATE.isLoading) {
+      debugHotkeyLog("ask skipped: assistant already loading");
+      throw new Error("Assistant is already generating a response.");
+    }
+
+    const mode = "code";
+    const usePageContext = true;
+    const deepSolve = STATE.deepSolve !== false;
+    const selectedText = getSelectedText();
+    const customQuestion = selectedText || "";
+
+    const rawBodyText = usePageContext ? getBodyText() : "";
+    const bodyText = usePageContext
+      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
+      : "";
+
+    if (isLikelyMcqContext(`${customQuestion}\n${bodyText}`)) {
+      debugHotkeyLog("ask skipped: mcq context detected");
+      throw new Error("MCQ auto-click is disabled. This shortcut supports coding questions only.");
+    }
+
+    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
+    const runVerificationPass = shouldRunDeepSolve({
+      deepSolve,
+      mode,
+      customQuestion,
+      difficulty,
+    });
+    const provider = deepSolve ? "gemini" : "groq";
+
+    const messages = buildMessages({
+      bodyText,
+      customQuestion,
+      mode,
+      usePageContext,
+      deepSolve,
+      difficulty,
+    });
+
+    debugHotkeyLog("ask start", {
+      provider,
+      deepSolve,
+      difficulty,
+      selectedChars: selectedText.length,
+      contextChars: bodyText.length,
+    });
+
+    STATE.isLoading = true;
+    STATE.mode = mode;
+    STATE.usePageContext = usePageContext;
+    STATE.deepSolve = deepSolve;
+    persistUiState();
+
+    try {
+      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
+        debugHotkeyLog("ask failed: missing gemini key");
+        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
+      }
+
+      const firstPass =
+        provider === "gemini"
+          ? await requestGeminiWithKeyRotation(messages, {
+              temperature: 0.1,
+              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
+              thinkingBudget: getGeminiThinkingBudget(difficulty, mode, false),
+            })
+          : await requestGroqWithKeyRotation(messages, {
+              temperature: 0.1,
+              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
+            });
+
+      let reply = sanitizeReply(
+        extractProviderText(provider, firstPass.data) || "No response.",
+        mode
+      );
+
+      const firstPassCutOff =
+        provider === "gemini" && isGeminiOutputCutOff(firstPass.data);
+
+      if (
+        runVerificationPass ||
+        firstPassCutOff ||
+        isLowConfidenceReply(reply, mode) ||
+        isLikelyIncompleteCode(reply)
+      ) {
+        const verifyMessages = buildVerificationMessages({
+          bodyText,
+          customQuestion,
+          mode,
+          usePageContext,
+          draftReply: reply,
+        });
+
+        const secondPass =
+          provider === "gemini"
+            ? await requestGeminiWithKeyRotation(verifyMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
+                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
+              })
+            : await requestGroqWithKeyRotation(verifyMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
+              });
+
+        const verifiedReply = sanitizeReply(extractProviderText(provider, secondPass.data) || "", mode);
+        if (verifiedReply) reply = verifiedReply;
+      }
+
+      if (mode === "code" && !isCodeOnlyReplyValid(reply)) {
+        const repairMessages = buildCodeOnlyRepairMessages({
+          bodyText,
+          customQuestion,
+          usePageContext,
+          draftReply: reply,
+        });
+
+        const repairPass =
+          provider === "gemini"
+            ? await requestGeminiWithKeyRotation(repairMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
+                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
+              })
+            : await requestGroqWithKeyRotation(repairMessages, {
+                temperature: 0.1,
+                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
+              });
+
+        const repairedReply = sanitizeReply(
+          extractProviderText(provider, repairPass.data) || "",
+          mode
+        );
+
+        if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
+          reply = repairedReply;
+        }
+      }
+
+      STATE.answerText = reply;
+      STATE.answerClass = "sr-answer";
+      addToChatHistory(customQuestion || "Use current webpage context", reply);
+      debugHotkeyLog("ask success", { answerChars: String(reply || "").length });
+
+      const livePanel = document.getElementById("__sr-panel");
+      if (livePanel) {
+        const liveAnswer = livePanel.querySelector("#sr-answer");
+        if (liveAnswer) {
+          liveAnswer.className = "sr-answer";
+          liveAnswer.textContent = reply;
+        }
+        updateCopyButton(livePanel, reply, "sr-answer");
+      }
+
+      return reply;
+    } finally {
+      STATE.isLoading = false;
+      persistUiState();
+    }
+  }
+
   // Force-insert text into any element (input, textarea, contenteditable, code editors)
   function forceInsertText(el, text) {
     if (!el || !text) return false;
@@ -858,6 +1221,7 @@
 
     const copyBtn = panel.querySelector("#sr-copy-btn");
     const pasteBtn = panel.querySelector("#sr-paste-btn");
+    const typeBtn = panel.querySelector("#sr-type-btn");
     if (!copyBtn) return;
 
     const hasAnswer = answerClass === "sr-answer" && String(answerText || "").trim();
@@ -865,6 +1229,7 @@
     if (!hasAnswer) {
       copyBtn.style.display = "none";
       if (pasteBtn) pasteBtn.style.display = "none";
+      if (typeBtn) typeBtn.style.display = "none";
       copyBtn.dataset.copyText = "";
       copyBtn.textContent = "copy";
       return;
@@ -884,6 +1249,15 @@
       pasteBtn.dataset.pasteText = copyText;
     } else if (pasteBtn) {
       pasteBtn.style.display = "none";
+    }
+
+    if (typeBtn && language) {
+      typeBtn.style.display = "inline-block";
+      typeBtn.dataset.typeText = copyText;
+      typeBtn.title = "Type code into focused editor (Alt+Shift+Q)";
+    } else if (typeBtn) {
+      typeBtn.style.display = "none";
+      typeBtn.dataset.typeText = "";
     }
   }
 
@@ -1775,6 +2149,7 @@
       <div class="sr-footer">
         <button class="sr-copy-btn" id="sr-copy-btn" style="display:none;">copy</button>
         <button class="sr-copy-btn" id="sr-paste-btn" style="display:none;" title="Force-paste code into the active editor field">paste code</button>
+        <button class="sr-copy-btn" id="sr-type-btn" style="display:none;" title="Type code into focused editor">type code</button>
         <button class="sr-clear-btn" id="sr-clear-btn">clear</button>
         <button class="sr-ask-btn" id="sr-ask-btn">ask</button>
       </div>
@@ -1924,6 +2299,40 @@
       }, 1500);
     });
 
+    panel.querySelector("#sr-type-btn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+
+      const typeBtn = panel.querySelector("#sr-type-btn");
+      if (isTypingCodeNow) {
+        updateTypeButton(panel, "typing...", 900);
+        return;
+      }
+
+      const textToType = typeBtn?.dataset?.typeText || getLatestGeneratedCode();
+
+      if (!textToType) {
+        updateTypeButton(panel, "no code", 1200);
+        return;
+      }
+
+      panel.style.opacity = "0.05";
+      panel.style.pointerEvents = "none";
+      if (typeBtn) typeBtn.disabled = true;
+      await sleep(100);
+
+      const result = await typeCodeIntoEditor(textToType);
+
+      panel.style.opacity = "";
+      panel.style.pointerEvents = "";
+      if (typeBtn) typeBtn.disabled = false;
+
+      if (result.success) {
+        updateTypeButton(panel, result.usedFallback ? "inserted ✓" : "typed ✓");
+      } else {
+        updateTypeButton(panel, "focus editor", 1500);
+      }
+    });
+
     panel.querySelector("#sr-clear-btn")?.addEventListener("click", (e) => {
       e.stopPropagation();
       clearConversation(panel);
@@ -1986,6 +2395,18 @@
   logBodyText();
 
   document.addEventListener("keydown", (e) => {
+    if (e.altKey && e.shiftKey && HOTKEY_DEBUG) {
+      debugHotkeyLog("key event", {
+        key: e.key,
+        code: e.code,
+        repeat: e.repeat,
+        ctrl: e.ctrlKey,
+        alt: e.altKey,
+        shift: e.shiftKey,
+        target: e.target?.tagName || "unknown",
+      });
+    }
+
     if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === TOGGLE_HOTKEY_KEY) {
       e.preventDefault();
       setWidgetHidden(!STATE.isWidgetHidden);
@@ -2003,7 +2424,41 @@
         expandPanel();
       }
     }
-  });
+
+    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === SMART_ACTION_HOTKEY_KEY) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
+        debugHotkeyLog("hotkey skipped", {
+          reason: e.repeat ? "repeat" : isTypingCodeNow ? "typing-in-progress" : "flow-in-progress",
+        });
+        return;
+      }
+
+      const now = Date.now();
+      if (now - lastTypeTriggerAt < 350) {
+        debugHotkeyLog("hotkey skipped: debounce");
+        return;
+      }
+
+      isSmartHotkeyFlowRunning = true;
+      debugHotkeyLog("hotkey accepted: Alt+Shift+Q");
+
+      runHeadlessAskForCode()
+        .then((reply) => typeCodeIntoEditor(reply))
+        .then((result) => {
+          debugHotkeyLog("flow result", result);
+        })
+        .catch((error) => {
+          console.warn("[SR-EXT] Alt+Shift+Q skipped:", error?.message || error);
+          debugHotkeyLog("flow error", error?.message || String(error));
+        })
+        .finally(() => {
+          isSmartHotkeyFlowRunning = false;
+          debugHotkeyLog("flow finished");
+        });
+    }
+  }, true);
 
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === "readPage") {
@@ -2023,6 +2478,28 @@
         expandPanel();
         sendResponse({ visible: true });
       }
+    }
+
+    if (msg.action === "typeLastCode") {
+      const code = getLatestGeneratedCode();
+
+      if (!code) {
+        sendResponse({ success: false, message: "No generated code found yet." });
+        return true;
+      }
+
+      typeCodeIntoEditor(code)
+        .then((result) => {
+          sendResponse({
+            success: Boolean(result?.success),
+            message: result?.reason || (result?.usedFallback ? "Inserted with fallback." : "Typed successfully."),
+          });
+        })
+        .catch((error) => {
+          sendResponse({ success: false, message: error?.message || "Typing failed." });
+        });
+
+      return true;
     }
 
     return true;
