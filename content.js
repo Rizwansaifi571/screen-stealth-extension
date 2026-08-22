@@ -16,11 +16,14 @@
   let apiKeysLoadPromise = null;
 
   const GEMINI_MODELS = [
-    // Prioritize strongest reasoning model first, then faster/cheaper fallbacks.
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+    // 1. Strongest reasoning model for complex algorithmic edge cases
+    "gemini-3.1-pro-preview",
+    // 2. Newest coding workhorse fallback (highly capable, faster)
+    "gemini-3.7-flash",
+    // 3. Cost-effective secondary fallback with near-Pro intelligence
+    "gemini-3.5-flash",
+    // 4. Ultimate lightweight fallback (best for simpler syntax tasks)
+    "gemini-3.5-flash-lite",
   ];
 
   let activeGroqKeyIndex = 0;
