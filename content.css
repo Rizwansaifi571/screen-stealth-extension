@@ -363,6 +363,48 @@
   border-color: rgba(70, 70, 70, 0.28);
 }
 
+/* Typing speed control */
+.sr-speed-row {
+  margin-top: 6px;
+
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sr-speed-label {
+  flex: 0 0 auto;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9.5px;
+  line-height: 1;
+
+  color: rgba(0, 0, 0, 0.58);
+  text-transform: lowercase;
+}
+
+.sr-speed-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 14px;
+
+  accent-color: #555;
+  cursor: pointer;
+}
+
+.sr-speed-value {
+  flex: 0 0 auto;
+
+  min-width: 28px;
+  text-align: right;
+
+  font-family: "Segoe UI", Arial, sans-serif;
+  font-size: 9.5px;
+  line-height: 1;
+
+  color: rgba(0, 0, 0, 0.68);
+}
+
 /* Footer */
 .sr-footer {
   flex: 0 0 auto;

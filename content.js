@@ -100,6 +100,7 @@
     mode: "code",
     usePageContext: true,
     deepSolve: true,
+    typingSpeed: 1,
     chatHistory: [],
   };
 
@@ -222,6 +223,11 @@
       STATE.mode = typeof saved?.mode === "string" ? saved.mode : "code";
       STATE.usePageContext = saved?.usePageContext !== false;
       STATE.deepSolve = saved?.deepSolve !== false;
+      STATE.typingSpeed = clamp(
+        Number.isFinite(Number(saved?.typingSpeed)) ? Number(saved.typingSpeed) : 1,
+        0.5,
+        3
+      );
 
       if (Array.isArray(saved?.chatHistory)) {
         STATE.chatHistory = saved.chatHistory.slice(-MAX_HISTORY_ITEMS);
@@ -243,6 +249,7 @@
           mode: STATE.mode,
           usePageContext: STATE.usePageContext,
           deepSolve: STATE.deepSolve,
+          typingSpeed: STATE.typingSpeed,
           chatHistory: STATE.chatHistory.slice(-MAX_HISTORY_ITEMS),
         })
       );
@@ -744,43 +751,154 @@
   }
 
   function getTypingDelay(ch) {
-    if (ch === "\n") return 220 + Math.floor(Math.random() * 260); // Line break hesitation
-    if (/[.,;:!?]/.test(ch)) return 90 + Math.floor(Math.random() * 120); // Punctuation pause
-    if (/[(){}\[\]<>]/.test(ch)) return 70 + Math.floor(Math.random() * 90); // Syntax symbols
-    if (ch === " ") return 50 + Math.floor(Math.random() * 50); // Word gap
-    if (ch === "\t") return 70 + Math.floor(Math.random() * 80);
-    return 45 + Math.floor(Math.random() * 65); // Standard character
-  }
+    const speed = clamp(Number(STATE.typingSpeed) || 1, 0.5, 3);
+    let baseDelay;
 
-  function normalizeGenericCodeLines(text) {
-    const rawLines = String(text || "")
-      .replace(/\t/g, "  ")
-      .replace(/\u00a0/g, " ")
-      .split("\n")
-      .map((line) => line.replace(/[ \t]+$/g, ""));
+    if (ch === "\n") baseDelay = 220 + Math.floor(Math.random() * 260); // Line break hesitation
+    else if (/[.,;:!?]/.test(ch)) baseDelay = 90 + Math.floor(Math.random() * 120); // Punctuation pause
+    else if (/[(){}\[\]<>]/.test(ch)) baseDelay = 70 + Math.floor(Math.random() * 90); // Syntax symbols
+    else if (ch === " ") baseDelay = 50 + Math.floor(Math.random() * 50); // Word gap
+    else if (ch === "\t") baseDelay = 70 + Math.floor(Math.random() * 80);
+    else baseDelay = 45 + Math.floor(Math.random() * 65); // Standard character
 
-    let minIndent = Infinity;
-    for (const line of rawLines) {
-      if (!line.trim()) continue;
-      const match = line.match(/^ +/);
-      const indent = match ? match[0].length : 0;
-      minIndent = Math.min(minIndent, indent);
-    }
-
-    const dedent = Number.isFinite(minIndent) ? minIndent : 0;
-    return rawLines.map((line) => {
-      if (!line.trim()) return "";
-      return dedent > 0 ? line.slice(Math.min(dedent, line.length)) : line;
-    });
+    return Math.max(8, Math.round(baseDelay / speed));
   }
 
   function normalizeCodeFormatting(text) {
-    const lines = normalizeGenericCodeLines(text);
-    return lines
-      .join("\n")
+    let value = String(text || "")
       .replace(/\r\n?/g, "\n")
-      .replace(/\n{3,}/g, "\n\n") // Max 2 consecutive newlines
-      .trim();
+      .replace(/\u00a0/g, " ");
+
+    const fenced = value.match(/```[a-zA-Z0-9#+._-]*\s*\n([\s\S]*?)```/i);
+    if (fenced?.[1]) {
+      value = fenced[1];
+    } else {
+      value = value.replace(/^```[a-zA-Z0-9#+._-]*\s*\n?/i, "");
+      value = value.replace(/```$/, "");
+    }
+
+    return value
+      .replace(/^(?:[ \t]*\n)+/, "")
+      .replace(/(?:\n[ \t]*)+$/, "");
+  }
+
+  const AUTO_CLOSE_CHARS = {
+    "(": ")",
+    "[": "]",
+    "{": "}",
+    "\"": "\"",
+    "'": "'",
+  };
+
+  function getEditorTextSnapshot(el) {
+    if (!el) return "";
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      return String(el.value || "");
+    }
+    return String(el.innerText || el.textContent || "");
+  }
+
+  function getEditorCaretIndex(el) {
+    if (!el) return -1;
+
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      return Number.isFinite(el.selectionStart) ? el.selectionStart : String(el.value || "").length;
+    }
+
+    const selection = window.getSelection?.();
+    if (!selection || !selection.rangeCount) return -1;
+
+    try {
+      const focusRange = selection.getRangeAt(0).cloneRange();
+      const preRange = document.createRange();
+      preRange.selectNodeContents(el);
+      preRange.setEnd(focusRange.endContainer, focusRange.endOffset);
+      return preRange.toString().length;
+    } catch {
+      return -1;
+    }
+  }
+
+  function setEditorCaretIndex(el, index) {
+    const nextIndex = Math.max(0, Number(index) || 0);
+
+    if (!el) return false;
+
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      try {
+        el.selectionStart = nextIndex;
+        el.selectionEnd = nextIndex;
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    const selection = window.getSelection?.();
+    if (!selection) return false;
+
+    try {
+      const range = document.createRange();
+      const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+      let remaining = nextIndex;
+      let node = walker.nextNode();
+
+      while (node) {
+        const len = node.nodeValue.length;
+        if (remaining <= len) {
+          range.setStart(node, remaining);
+          range.collapse(true);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          return true;
+        }
+        remaining -= len;
+        node = walker.nextNode();
+      }
+
+      range.selectNodeContents(el);
+      range.collapse(false);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function getCurrentLineIndent(el) {
+    const text = getEditorTextSnapshot(el);
+    const caret = getEditorCaretIndex(el);
+    if (caret < 0) return "";
+
+    const lineStart = text.lastIndexOf("\n", Math.max(0, caret - 1)) + 1;
+    return text.slice(lineStart, caret).match(/^[ \t]*/)?.[0] || "";
+  }
+
+  function getAutoCloseChar(ch) {
+    return AUTO_CLOSE_CHARS[ch] || "";
+  }
+
+  function shouldSkipAutoClosedChar(el, sourceChars, index, ch) {
+    const prevSource = sourceChars[index - 1];
+    const expectedClose = getAutoCloseChar(prevSource);
+    if (!expectedClose || expectedClose !== ch) return false;
+
+    const currentText = getEditorTextSnapshot(el);
+    const caret = getEditorCaretIndex(el);
+    if (caret < 0) return false;
+
+    if (currentText[caret] === ch) {
+      setEditorCaretIndex(el, caret + 1);
+      return true;
+    }
+
+    if (currentText[caret - 1] === prevSource && currentText[caret] === ch) {
+      setEditorCaretIndex(el, caret + 1);
+      return true;
+    }
+
+    return false;
   }
 
   function isLikelyMcqContext(text) {
@@ -808,83 +926,17 @@
       el.classList?.toString().toLowerCase().includes("monaco") ||
       el.classList?.toString().toLowerCase().includes("ace");
 
-    /*
-    * ---------------------------------------------------------
-    * TEXTAREA / INPUT
-    * ---------------------------------------------------------
-    */
-    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
-      el.focus();
+    const typeAndWait = async (ch) => {
+      let inserted = false;
 
-      let charsTyped = 0;
-      let atLineStart = false;
-
-      for (let i = 0; i < content.length; i += 1) {
-        const ch = content[i];
-
-        // Skip extra source spaces right after \n if editor auto-indents
-        if (atLineStart && (ch === " " || ch === "\t")) {
-          continue;
-        }
-
-        atLineStart = ch === "\n";
-
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
         const start = Number.isFinite(el.selectionStart)
           ? el.selectionStart
           : String(el.value || "").length;
-
-        const end = Number.isFinite(el.selectionEnd)
-          ? el.selectionEnd
-          : start;
-
+        const end = Number.isFinite(el.selectionEnd) ? el.selectionEnd : start;
         el.setRangeText(ch, start, end, "end");
-
-        charsTyped += 1;
-
-        el.dispatchEvent(
-          new InputEvent("input", {
-            bubbles: true,
-            cancelable: true,
-            inputType: "insertText",
-            data: ch,
-          })
-        );
-
-        // Periodic human thinking pause (every ~50-80 chars)
-        if (charsTyped > 0 && charsTyped % (50 + Math.floor(Math.random() * 30)) === 0) {
-          await sleep(220 + Math.floor(Math.random() * 380));
-        }
-
-        await sleep(getTypingDelay(ch));
-      }
-
-      el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
-      return { success: charsTyped > 0, charsTyped };
-    }
-
-    /*
-    * ---------------------------------------------------------
-    * CONTENTEDITABLE (Monaco / Ace / Custom Web Editors)
-    * ---------------------------------------------------------
-    */
-    if (isSmartEditor) {
-      el.focus();
-
-      let charsTyped = 0;
-      let atLineStart = false;
-
-      for (let i = 0; i < content.length; i += 1) {
-        const ch = content[i];
-
-        // Skip leading spaces after newlines since smart editors auto-indent
-        if (atLineStart && (ch === " " || ch === "\t")) {
-          continue;
-        }
-
-        atLineStart = ch === "\n";
-
-        let inserted = false;
-
+        inserted = true;
+      } else if (isSmartEditor) {
         try {
           inserted = document.execCommand("insertText", false, ch);
         } catch (_) {
@@ -908,25 +960,110 @@
 
         if (!inserted) {
           el.textContent = `${el.textContent || ""}${ch}`;
+          inserted = true;
+        }
+      }
+
+      if (!inserted) return false;
+
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: ch,
+        })
+      );
+
+      return true;
+    };
+
+    /*
+    * ---------------------------------------------------------
+    * TEXTAREA / INPUT
+    * ---------------------------------------------------------
+    */
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      el.focus();
+
+      let charsTyped = 0;
+      let pendingIndentSkip = "";
+
+      for (let i = 0; i < content.length; i += 1) {
+        const ch = content[i];
+
+        if (pendingIndentSkip && /\s/.test(ch) && pendingIndentSkip[0] === ch) {
+          pendingIndentSkip = pendingIndentSkip.slice(1);
+          continue;
+        }
+
+        if (shouldSkipAutoClosedChar(el, content, i, ch)) {
+          continue;
+        }
+
+        if (!(await typeAndWait(ch))) {
+          return { success: false, charsTyped };
         }
 
         charsTyped += 1;
 
-        el.dispatchEvent(
-          new InputEvent("input", {
-            bubbles: true,
-            cancelable: true,
-            inputType: "insertText",
-            data: ch,
-          })
-        );
+        await sleep(getTypingDelay(ch));
+
+        if (ch === "\n") {
+          await sleep(24);
+          pendingIndentSkip = getCurrentLineIndent(el);
+        }
+
+        // Periodic human thinking pause (every ~50-80 chars)
+        if (charsTyped > 0 && charsTyped % (50 + Math.floor(Math.random() * 30)) === 0) {
+          await sleep(220 + Math.floor(Math.random() * 380));
+        }
+      }
+
+      el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
+      return { success: charsTyped > 0, charsTyped };
+    }
+
+    /*
+    * ---------------------------------------------------------
+    * CONTENTEDITABLE (Monaco / Ace / Custom Web Editors)
+    * ---------------------------------------------------------
+    */
+    if (isSmartEditor) {
+      el.focus();
+
+      let charsTyped = 0;
+      let pendingIndentSkip = "";
+
+      for (let i = 0; i < content.length; i += 1) {
+        const ch = content[i];
+
+        if (pendingIndentSkip && /\s/.test(ch) && pendingIndentSkip[0] === ch) {
+          pendingIndentSkip = pendingIndentSkip.slice(1);
+          continue;
+        }
+
+        if (shouldSkipAutoClosedChar(el, content, i, ch)) {
+          continue;
+        }
+
+        if (!(await typeAndWait(ch))) {
+          return { success: false, charsTyped };
+        }
+
+        charsTyped += 1;
+
+        await sleep(getTypingDelay(ch));
+
+        if (ch === "\n") {
+          await sleep(24);
+          pendingIndentSkip = getCurrentLineIndent(el);
+        }
 
         // Periodic human thinking pause
         if (charsTyped > 0 && charsTyped % (50 + Math.floor(Math.random() * 30)) === 0) {
           await sleep(220 + Math.floor(Math.random() * 380));
         }
-
-        await sleep(getTypingDelay(ch));
       }
 
       return { success: charsTyped > 0, charsTyped };
@@ -1471,6 +1608,7 @@
         "Think silently. Do not reveal reasoning.",
         "Before final answer, internally verify constraints, edge cases, overflow, and time complexity.",
         "Output ONLY complete final source code.",
+        "Use standard readable formatting with proper indentation and blank lines between logical sections.",
         "No markdown fences.",
         "No explanations.",
         "No comments.",
@@ -1552,6 +1690,7 @@
         "Task:",
         "Return the final accepted solution code only.",
         "The code must be complete and directly submittable.",
+        "Use standard readable formatting with proper indentation and blank lines between logical sections.",
         "Do not include comments.",
         "Do not include explanation.",
         "Do not include markdown.",
@@ -1590,6 +1729,7 @@
       [
         "Rewrite the answer now.",
         "Return ONLY complete final source code.",
+        "Use standard readable formatting with proper indentation and blank lines between logical sections.",
         "No comments.",
         "No explanation.",
         "No markdown.",
@@ -1608,6 +1748,7 @@
         content: [
           "You are a strict competitive-programming code generator.",
           "Output only complete final code.",
+          "Use standard readable formatting with proper indentation and blank lines between logical sections.",
           "Never output comments or explanation.",
           "Never output markdown.",
         ].join(" "),
@@ -1630,6 +1771,7 @@
             "Verify correctness, edge cases, overflow, and constraints.",
             "If the draft is wrong, incomplete, or comment-heavy, rewrite it fully.",
             "Return ONLY final complete source code.",
+            "Use standard readable formatting with proper indentation and blank lines between logical sections.",
             "No comments.",
             "No markdown.",
             "No explanation.",
@@ -1653,12 +1795,13 @@
         content:
           mode === "code"
             ? [
-                "You are a senior competitive-programming reviewer.",
-                "Think silently.",
-                "Return only the corrected final code.",
-                "No comments.",
-                "No explanation.",
-                "No markdown.",
+              "You are a senior competitive-programming reviewer.",
+              "Think silently.",
+              "Return only the corrected final code.",
+              "Use standard readable formatting with proper indentation and blank lines between logical sections.",
+              "No comments.",
+              "No explanation.",
+              "No markdown.",
               ].join(" ")
             : [
                 "You are a strict answer verifier.",
@@ -2315,6 +2458,20 @@
             <option value="explain">explain</option>
           </select>
         </div>
+
+        <div class="sr-speed-row">
+          <label class="sr-speed-label" for="sr-typing-speed">typing speed</label>
+          <input
+            id="sr-typing-speed"
+            class="sr-speed-slider"
+            type="range"
+            min="0.5"
+            max="3"
+            step="0.1"
+            value="1"
+          />
+          <span class="sr-speed-value" id="sr-typing-speed-value">1.0x</span>
+        </div>
       </div>
 
       <div class="sr-footer">
@@ -2347,12 +2504,16 @@
     const modeEl = panel.querySelector("#sr-mode-select");
     const usePageEl = panel.querySelector("#sr-use-page-context");
     const deepSolveEl = panel.querySelector("#sr-deep-solve");
+    const typingSpeedEl = panel.querySelector("#sr-typing-speed");
+    const typingSpeedValueEl = panel.querySelector("#sr-typing-speed-value");
 
     if (answerEl && STATE.answerText) answerEl.textContent = STATE.answerText;
     if (inputEl) inputEl.value = STATE.questionText || "";
     if (modeEl) modeEl.value = STATE.mode || "code";
     if (usePageEl) usePageEl.checked = STATE.usePageContext !== false;
     if (deepSolveEl) deepSolveEl.checked = STATE.deepSolve !== false;
+    if (typingSpeedEl) typingSpeedEl.value = String(clamp(Number(STATE.typingSpeed) || 1, 0.5, 3));
+    if (typingSpeedValueEl) typingSpeedValueEl.textContent = `${Number(clamp(Number(STATE.typingSpeed) || 1, 0.5, 3)).toFixed(1)}x`;
 
     updateCopyButton(panel, STATE.answerText, STATE.answerClass);
 
@@ -2531,6 +2692,15 @@
 
     deepSolveEl?.addEventListener("change", () => {
       STATE.deepSolve = deepSolveEl.checked;
+      persistUiState();
+    });
+
+    typingSpeedEl?.addEventListener("input", () => {
+      const nextSpeed = clamp(Number(typingSpeedEl.value) || 1, 0.5, 3);
+      STATE.typingSpeed = nextSpeed;
+      if (typingSpeedValueEl) {
+        typingSpeedValueEl.textContent = `${nextSpeed.toFixed(1)}x`;
+      }
       persistUiState();
     });
 
