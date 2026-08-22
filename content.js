@@ -1161,7 +1161,7 @@
 
     await ensureApiKeysLoaded();
 
-    const mode = "code";
+    const mode = STATE.mode || "code";
     const usePageContext = true;
     const deepSolve = STATE.deepSolve !== false;
     const selectedText = getSelectedText();
@@ -1171,11 +1171,6 @@
     const bodyText = usePageContext
       ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
       : "";
-
-    if (isLikelyMcqContext(`${customQuestion}\n${bodyText}`)) {
-      debugHotkeyLog("ask skipped: mcq context detected");
-      throw new Error("MCQ auto-click is disabled. This shortcut supports coding questions only.");
-    }
 
     const difficulty = inferDifficulty(customQuestion, mode, bodyText);
     const runVerificationPass = shouldRunDeepSolve({
@@ -1560,13 +1555,10 @@
       pasteBtn.style.display = "none";
     }
 
-    if (typeBtn && language) {
+    if (typeBtn) {
       typeBtn.style.display = "inline-block";
       typeBtn.dataset.typeText = copyText;
-      typeBtn.title = "Type code into focused editor (Alt+Shift+Q)";
-    } else if (typeBtn) {
-      typeBtn.style.display = "none";
-      typeBtn.dataset.typeText = "";
+      typeBtn.title = "Type text into focused editor (Alt+Shift+Q)";
     }
   }
 
