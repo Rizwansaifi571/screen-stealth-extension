@@ -38,6 +38,7 @@
   const UI_STATE_KEY = "__sr_widget_ui_state_v2";
   const TOGGLE_HOTKEY_KEY = "H";
   const SMART_ACTION_HOTKEY_KEY = "Q";
+  const SMART_MCQ_HOTKEY_KEY = "&";
   const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG !== false;
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
@@ -663,6 +664,21 @@
       return isVerificationPass ? 4096 : 3072;
     }
 
+    if (mode === "mcq") {
+      return [
+        "You are an expert test taker.",
+        "The user is showing you a page with one or more multiple choice questions.",
+        "Your goal is to identify the correct option for EVERY question.",
+        "Output ONLY a valid JSON array of strings, where each string is the EXACT TEXT of the correct option for a question, in order of appearance.",
+        "For example: [\"Option 1 text\", \"Option 2 text\"]",
+        "Do not include any other text, reasoning, or markdown fences (like ```json)."
+      ].join(" ");
+    }
+
+    if (mode === "mcq") {
+      return isVerificationPass ? 1500 : 1000;
+    }
+
     if (mode === "explain") {
       if (difficulty === "hard") return isVerificationPass ? 2200 : 1700;
       if (difficulty === "medium") return isVerificationPass ? 1700 : 1300;
@@ -792,6 +808,148 @@
     "\"": "\"",
     "'": "'",
   };
+
+  
+  async function runHeadlessAskForMCQ() {
+    if (STATE.isLoading) {
+      debugHotkeyLog("mcq skipped: assistant already loading");
+      throw new Error("Assistant is already generating a response.");
+    }
+
+    await ensureApiKeysLoaded();
+
+    const mode = "mcq";
+    const usePageContext = true;
+    const deepSolve = STATE.deepSolve !== false;
+    const selectedText = getSelectedText();
+    const customQuestion = selectedText || "";
+
+    const rawBodyText = usePageContext ? getBodyText() : "";
+    const bodyText = usePageContext
+      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
+      : "";
+
+    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
+    const provider = deepSolve ? "gemini" : "groq";
+
+    const messages = buildMessages({
+      bodyText,
+      customQuestion,
+      mode,
+      usePageContext,
+      deepSolve,
+      difficulty,
+    });
+
+    debugHotkeyLog("mcq start", {
+      provider,
+      deepSolve,
+      difficulty,
+      selectedChars: selectedText.length,
+      contextChars: bodyText.length,
+    });
+
+    STATE.isLoading = true;
+
+    try {
+      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
+        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
+      }
+
+      const response =
+        provider === "gemini"
+          ? await requestGeminiWithKeyRotation(messages, {
+              temperature: 0.1,
+              maxCompletionTokens: 1000,
+              thinkingBudget: deepSolve ? 1024 : 0,
+            })
+          : await requestGroqWithKeyRotation(messages, {
+              temperature: 0.1,
+              maxCompletionTokens: 1000,
+            });
+
+      let reply = sanitizeReply(extractProviderText(provider, response.data) || "", mode);
+      
+      let answers = [];
+      try {
+        const jsonMatch = reply.match(/\[.*\]/s);
+        if (jsonMatch) {
+          answers = JSON.parse(jsonMatch[0]);
+        } else {
+          answers = JSON.parse(reply);
+        }
+      } catch (e) {
+        answers = [reply];
+      }
+      
+      debugHotkeyLog("mcq success", { answerCount: answers.length });
+      return answers;
+    } finally {
+      STATE.isLoading = false;
+    }
+  }
+
+  async function clickCorrectMCQOptions(answers) {
+    if (!Array.isArray(answers) || answers.length === 0) return { success: false, reason: "Empty answers" };
+    
+    let clickedCount = 0;
+    const clickedTexts = [];
+    
+    for (const answer of answers) {
+      if (!answer || typeof answer !== "string" || answer.length < 1) continue;
+      
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+      let node;
+      const candidates = [];
+      const cleanAnswer = answer.toLowerCase().trim();
+      
+      while ((node = walker.nextNode())) {
+        const text = node.nodeValue.trim().toLowerCase();
+        if (!text) continue;
+        
+        const parent = node.parentElement;
+        if (!parent || parent.tagName === "SCRIPT" || parent.tagName === "STYLE" || parent.tagName === "NOSCRIPT") continue;
+        
+        let score = 0;
+        if (text === cleanAnswer) score = 100;
+        else if (text.includes(cleanAnswer) && cleanAnswer.length > 3) score = 50 + (cleanAnswer.length / text.length) * 50;
+        else if (cleanAnswer.includes(text) && text.length > 5) score = 40 + (text.length / cleanAnswer.length) * 40;
+        
+        if (score > 40) {
+          let clickable = parent;
+          let levels = 0;
+          while (clickable && clickable !== document.body && levels < 4) {
+            candidates.push({ el: clickable, score, text });
+            clickable = clickable.parentElement;
+            levels++;
+          }
+        }
+      }
+      
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => b.score - a.score);
+        const best = candidates[0].el;
+        
+        try {
+          best.scrollIntoView({ behavior: "smooth", block: "center" });
+          await sleep(600); // Wait for scroll
+          best.click();
+          const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window });
+          const mouseup = new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window });
+          best.dispatchEvent(mousedown);
+          best.dispatchEvent(mouseup);
+          
+          clickedCount++;
+          clickedTexts.push(candidates[0].text);
+          await sleep(600); // Pause before finding next to mimic human behavior
+        } catch (e) {
+          console.warn("Failed to click:", e);
+        }
+      }
+    }
+    
+    return { success: clickedCount > 0, clickedCount, clickedTexts };
+  }
 
   function getEditorTextSnapshot(el) {
     if (!el) return "";
@@ -1615,6 +1773,21 @@
         "If the user asks to fix code, return only the corrected complete code.",
         deepSolve ? "Prefer correctness and edge-case safety over short code." : "",
       ].join(" ");
+    }
+
+    if (mode === "mcq") {
+      return [
+        "You are an expert test taker.",
+        "The user is showing you a page with one or more multiple choice questions.",
+        "Your goal is to identify the correct option for EVERY question.",
+        "Output ONLY a valid JSON array of strings, where each string is the EXACT TEXT of the correct option for a question, in order of appearance.",
+        "For example: [\"Option 1 text\", \"Option 2 text\"]",
+        "Do not include any other text, reasoning, or markdown fences (like ```json)."
+      ].join(" ");
+    }
+
+    if (mode === "mcq") {
+      return isVerificationPass ? 1500 : 1000;
     }
 
     if (mode === "explain") {
@@ -2759,6 +2932,32 @@
         if (STATE.isWidgetHidden) setWidgetHidden(false);
         expandPanel();
       }
+    }
+
+    
+    if (e.altKey && e.shiftKey && String(e.key || "") === "&") {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
+        debugHotkeyLog("mcq skipped", { reason: "flow-in-progress" });
+        return;
+      }
+      isSmartHotkeyFlowRunning = true;
+      debugHotkeyLog("hotkey accepted: Alt+Shift+& (MCQ)");
+
+      runHeadlessAskForMCQ()
+        .then((answers) => clickCorrectMCQOptions(answers))
+        .then((result) => {
+          debugHotkeyLog("mcq flow result", result);
+        })
+        .catch((error) => {
+          console.warn("[SR-EXT] MCQ skipped:", error?.message || error);
+          debugHotkeyLog("mcq flow error", error?.message || String(error));
+        })
+        .finally(() => {
+          isSmartHotkeyFlowRunning = false;
+          debugHotkeyLog("mcq flow finished");
+        });
     }
 
     if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === SMART_ACTION_HOTKEY_KEY) {
