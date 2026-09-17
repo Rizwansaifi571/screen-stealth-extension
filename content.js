@@ -38,7 +38,7 @@
   const UI_STATE_KEY = "__sr_widget_ui_state_v2";
   const TOGGLE_HOTKEY_KEY = "H";
   const SMART_ACTION_HOTKEY_KEY = "Q";
-  const SMART_MCQ_HOTKEY_KEY = "&";
+  const SMART_MCQ_HOTKEY_KEY = "A";
   const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG !== false;
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
@@ -665,17 +665,6 @@
     }
 
     if (mode === "mcq") {
-      return [
-        "You are an expert test taker.",
-        "The user is showing you a page with one or more multiple choice questions.",
-        "Your goal is to identify the correct option for EVERY question.",
-        "Output ONLY a valid JSON array of strings, where each string is the EXACT TEXT of the correct option for a question, in order of appearance.",
-        "For example: [\"Option 1 text\", \"Option 2 text\"]",
-        "Do not include any other text, reasoning, or markdown fences (like ```json)."
-      ].join(" ");
-    }
-
-    if (mode === "mcq") {
       return isVerificationPass ? 1500 : 1000;
     }
 
@@ -809,6 +798,18 @@
     "'": "'",
   };
 
+  function parseMCQAnswers(reply) {
+    const cleanReply = String(reply || "").trim().replace(/^```json\s*/i, "").replace(/```$/g, "").trim();
+
+    try {
+      const jsonMatch = cleanReply.match(/\[[\s\S]*\]/);
+      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanReply);
+      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item.trim()) : [];
+    } catch {
+      return [];
+    }
+  }
+
   
   async function runHeadlessAskForMCQ() {
     if (STATE.isLoading) {
@@ -870,17 +871,7 @@
 
       let reply = sanitizeReply(extractProviderText(provider, response.data) || "", mode);
       
-      let answers = [];
-      try {
-        const jsonMatch = reply.match(/\[.*\]/s);
-        if (jsonMatch) {
-          answers = JSON.parse(jsonMatch[0]);
-        } else {
-          answers = JSON.parse(reply);
-        }
-      } catch (e) {
-        answers = [reply];
-      }
+      const answers = parseMCQAnswers(reply);
       
       debugHotkeyLog("mcq success", { answerCount: answers.length });
       return answers;
@@ -889,65 +880,104 @@
     }
   }
 
+  function normalizeMCQText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
+
+  function normalizeMCQOptionText(value) {
+    return normalizeMCQText(value).replace(/^(?:option\s*)?[a-e](?:[).:-])\s*/, "");
+  }
+
+  function isMCQOptionVisible(element) {
+    if (!element || element.closest("#__sr-panel, #__sr-tab")) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden" && element.getClientRects().length > 0;
+  }
+
+  function getMCQOptionElements() {
+    const elements = Array.from(
+      document.querySelectorAll(
+        'label, button, [role="radio"], [role="option"], input[type="radio"], input[type="checkbox"], [onclick]'
+      )
+    );
+    const seen = new Set();
+    const options = [];
+
+    for (const element of elements) {
+      if (!isMCQOptionVisible(element)) continue;
+
+      const input = element.matches('input[type="radio"], input[type="checkbox"]')
+        ? element
+        : element.querySelector('input[type="radio"], input[type="checkbox"]');
+      const clickable = input?.closest("label") || element;
+      const text = normalizeMCQText(clickable.textContent || element.getAttribute("aria-label"));
+      if (!text || seen.has(clickable)) continue;
+
+      seen.add(clickable);
+      options.push({ element: clickable, text, input });
+    }
+
+    return options;
+  }
+
+  function scoreMCQOption(optionText, answerText) {
+    const option = normalizeMCQText(optionText);
+    const answer = normalizeMCQText(answerText);
+    const optionBody = normalizeMCQOptionText(option);
+    const answerBody = normalizeMCQOptionText(answer);
+    if (!option || !answer) return 0;
+    if (option === answer) return 100;
+    if (optionBody === answerBody) return 98;
+    if (option.includes(answer) && answer.length > 3) return 80 - Math.min(20, (option.length - answer.length) / 10);
+    if (answer.includes(option) && option.length > 5) return 60 - Math.min(20, (answer.length - option.length) / 10);
+    if (optionBody.includes(answerBody) && answerBody.length > 3) return 78;
+    if (answerBody.includes(optionBody) && optionBody.length > 5) return 58;
+    return 0;
+  }
+
   async function clickCorrectMCQOptions(answers) {
-    if (!Array.isArray(answers) || answers.length === 0) return { success: false, reason: "Empty answers" };
-    
+    if (!Array.isArray(answers) || answers.length === 0) {
+      return { success: false, reason: "Empty answers" };
+    }
+
+    const options = getMCQOptionElements();
+    const used = new Set();
     let clickedCount = 0;
     const clickedTexts = [];
-    
+
     for (const answer of answers) {
-      if (!answer || typeof answer !== "string" || answer.length < 1) continue;
-      
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
-      let node;
-      const candidates = [];
-      const cleanAnswer = answer.toLowerCase().trim();
-      
-      while ((node = walker.nextNode())) {
-        const text = node.nodeValue.trim().toLowerCase();
-        if (!text) continue;
-        
-        const parent = node.parentElement;
-        if (!parent || parent.tagName === "SCRIPT" || parent.tagName === "STYLE" || parent.tagName === "NOSCRIPT") continue;
-        
-        let score = 0;
-        if (text === cleanAnswer) score = 100;
-        else if (text.includes(cleanAnswer) && cleanAnswer.length > 3) score = 50 + (cleanAnswer.length / text.length) * 50;
-        else if (cleanAnswer.includes(text) && text.length > 5) score = 40 + (text.length / cleanAnswer.length) * 40;
-        
-        if (score > 40) {
-          let clickable = parent;
-          let levels = 0;
-          while (clickable && clickable !== document.body && levels < 4) {
-            candidates.push({ el: clickable, score, text });
-            clickable = clickable.parentElement;
-            levels++;
-          }
-        }
-      }
-      
-      if (candidates.length > 0) {
-        candidates.sort((a, b) => b.score - a.score);
-        const best = candidates[0].el;
-        
-        try {
-          best.scrollIntoView({ behavior: "smooth", block: "center" });
-          await sleep(600); // Wait for scroll
-          best.click();
-          const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window });
-          const mouseup = new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window });
-          best.dispatchEvent(mousedown);
-          best.dispatchEvent(mouseup);
-          
-          clickedCount++;
-          clickedTexts.push(candidates[0].text);
-          await sleep(600); // Pause before finding next to mimic human behavior
-        } catch (e) {
-          console.warn("Failed to click:", e);
-        }
+      if (typeof answer !== "string" || !answer.trim()) continue;
+
+      const candidates = options
+        .filter((option) => !used.has(option.element))
+        .map((option, index) => ({
+          ...option,
+          index,
+          score: scoreMCQOption(option.text, answer),
+        }))
+        .filter((option) => option.score > 0)
+        .sort((left, right) => right.score - left.score || left.index - right.index);
+
+      const best = candidates[0];
+      if (!best) continue;
+
+      try {
+        best.element.scrollIntoView({ behavior: "smooth", block: "center" });
+        await sleep(250);
+        best.element.click();
+        if (best.input && !best.input.checked) best.input.click();
+        used.add(best.element);
+        clickedCount += 1;
+        clickedTexts.push(best.text);
+        await sleep(250);
+      } catch (error) {
+        console.warn("Failed to select MCQ option:", error);
       }
     }
-    
+
     return { success: clickedCount > 0, clickedCount, clickedTexts };
   }
 
@@ -1319,7 +1349,7 @@
 
     await ensureApiKeysLoaded();
 
-    const mode = STATE.mode || "code";
+    const mode = "code";
     const usePageContext = true;
     const deepSolve = STATE.deepSolve !== false;
     const selectedText = getSelectedText();
@@ -1331,12 +1361,14 @@
       : "";
 
     const difficulty = inferDifficulty(customQuestion, mode, bodyText);
-    const runVerificationPass = shouldRunDeepSolve({
-      deepSolve,
-      mode,
-      customQuestion,
-      difficulty,
-    });
+    const runVerificationPass =
+      mode !== "mcq" &&
+      shouldRunDeepSolve({
+        deepSolve,
+        mode,
+        customQuestion,
+        difficulty,
+      });
     const provider = deepSolve ? "gemini" : "groq";
 
     const messages = buildMessages({
@@ -1786,10 +1818,6 @@
       ].join(" ");
     }
 
-    if (mode === "mcq") {
-      return isVerificationPass ? 1500 : 1000;
-    }
-
     if (mode === "explain") {
       return [
         "You are a clear and accurate study and coding assistant.",
@@ -1843,6 +1871,8 @@
 
     if (cleanQuestion) {
       finalUserMessage += `Latest user question/instruction:\n${cleanQuestion}\n\n`;
+    } else if (mode === "mcq") {
+      finalUserMessage += "No typed question was provided. Find every multiple choice question and its options on the current page.\n\n";
     } else {
       finalUserMessage += "No typed question was provided. Identify the main coding problem from the page context and solve it.\n\n";
     }
@@ -1868,6 +1898,14 @@
         "Use the correct language/template from the problem context.",
         "For LeetCode-style C++ problems, return only complete class Solution code.",
         "For normal input/output problems, return a complete program with main().",
+      ].join("\n");
+    } else if (mode === "mcq") {
+      finalUserMessage += [
+        "Task:",
+        "Identify the correct option for every multiple choice question on the page.",
+        "Return only a valid JSON array of exact option texts in page order.",
+        "Return one array item per question.",
+        "Do not return code, explanations, letters, or markdown.",
       ].join("\n");
     } else if (mode === "answer") {
       finalUserMessage += "Output format: final answer first, then short key reasoning only if needed.";
@@ -1944,6 +1982,13 @@
             "No markdown.",
             "No explanation.",
           ].join("\n")
+        : mode === "mcq"
+          ? [
+              "Verify every question and selected option.",
+              "Return ONLY a valid JSON array of exact option texts in page order.",
+              "Return one item per question.",
+              "Do not return code, explanations, letters, or markdown.",
+            ].join("\n")
         : "Verify the draft answer carefully. Correct any mistakes and return a concise but complete final answer.";
 
     const userPrompt = [
@@ -2391,12 +2436,14 @@
       ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
       : "";
     const difficulty = inferDifficulty(customQuestion, mode, bodyText);
-    const runVerificationPass = shouldRunDeepSolve({
-      deepSolve,
-      mode,
-      customQuestion,
-      difficulty,
-    });
+    const runVerificationPass =
+      mode !== "mcq" &&
+      shouldRunDeepSolve({
+        deepSolve,
+        mode,
+        customQuestion,
+        difficulty,
+      });
     const provider = deepSolve ? "gemini" : "groq";
 
     const messages = buildMessages({
@@ -2436,7 +2483,7 @@
       if (
         runVerificationPass ||
         firstPassCutOff ||
-        isLowConfidenceReply(reply, mode) ||
+        (mode !== "mcq" && isLowConfidenceReply(reply, mode)) ||
         (mode === "code" && isLikelyIncompleteCode(reply))
       ) {
         const verifyMessages = buildVerificationMessages({
@@ -2494,6 +2541,13 @@
         if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
           reply = repairedReply;
         }
+      }
+
+      if (mode === "mcq") {
+        const answers = parseMCQAnswers(reply);
+        if (!answers.length) throw new Error("The model did not return valid MCQ answers.");
+        await clickCorrectMCQOptions(answers);
+        reply = JSON.stringify(answers);
       }
 
       const liveAnswerEl = document.getElementById("sr-answer");
@@ -2622,6 +2676,7 @@
 
           <select id="sr-mode-select" class="sr-mode-select" title="Answer mode">
             <option value="code">code only</option>
+            <option value="mcq">MCQ select answers</option>
             <option value="answer">short answer</option>
             <option value="explain">explain</option>
           </select>
@@ -2921,7 +2976,7 @@
       setWidgetHidden(!STATE.isWidgetHidden);
     }
 
-    // Alt+Shift+A - toggle ask panel open/closed (A = Ask)
+    // Alt+Shift+O - toggle ask panel open/closed
     if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === "O") {
       e.preventDefault();
       const panel = document.getElementById("__sr-panel");
@@ -2935,15 +2990,22 @@
     }
 
     
-    if (e.altKey && e.shiftKey && String(e.key || "") === "&") {
+    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === SMART_MCQ_HOTKEY_KEY) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
         debugHotkeyLog("mcq skipped", { reason: "flow-in-progress" });
         return;
       }
+      STATE.mode = "mcq";
+      STATE.questionText = "";
+      STATE.usePageContext = true;
+      persistUiState();
+      const livePanel = document.getElementById("__sr-panel");
+      const liveMode = livePanel?.querySelector("#sr-mode-select");
+      if (liveMode) liveMode.value = "mcq";
       isSmartHotkeyFlowRunning = true;
-      debugHotkeyLog("hotkey accepted: Alt+Shift+& (MCQ)");
+      debugHotkeyLog("hotkey accepted: Alt+Shift+A (MCQ)");
 
       runHeadlessAskForMCQ()
         .then((answers) => clickCorrectMCQOptions(answers))
