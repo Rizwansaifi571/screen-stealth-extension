@@ -804,10 +804,50 @@
     try {
       const jsonMatch = cleanReply.match(/\[[\s\S]*\]/);
       const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanReply);
-      return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string" && item.trim()) : [];
+      if (!Array.isArray(parsed)) return [];
+
+      return parsed
+        .map((item) => {
+          if (typeof item === "string") {
+            return { option: item.trim(), explanation: "" };
+          }
+
+          return {
+            option: String(item?.option || item?.answer || item?.text || "").trim(),
+            explanation: String(item?.explanation || item?.reason || "").trim(),
+          };
+        })
+        .filter((item) => item.option);
     } catch {
       return [];
     }
+  }
+
+  function formatMCQResults(answers) {
+    return answers
+      .map((answer, index) => {
+        const explanation = answer.explanation ? ` - ${answer.explanation}` : "";
+        return `${index + 1}. ${answer.option}${explanation}`;
+      })
+      .join("\n");
+  }
+
+  function showMCQResults(answers) {
+    const resultText = formatMCQResults(answers);
+    STATE.answerText = resultText;
+    STATE.answerClass = "sr-answer";
+    STATE.mode = "mcq";
+    persistUiState();
+
+    const panel = document.getElementById("__sr-panel");
+
+    const answerEl = panel?.querySelector("#sr-answer");
+    if (answerEl) {
+      answerEl.className = "sr-answer";
+      answerEl.textContent = resultText;
+    }
+    updateCopyButton(panel, resultText, "sr-answer");
+    return resultText;
   }
 
   
@@ -949,14 +989,15 @@
     const clickedTexts = [];
 
     for (const answer of answers) {
-      if (typeof answer !== "string" || !answer.trim()) continue;
+      const optionText = typeof answer === "string" ? answer : answer?.option;
+      if (typeof optionText !== "string" || !optionText.trim()) continue;
 
       const candidates = options
         .filter((option) => !used.has(option.element))
         .map((option, index) => ({
           ...option,
           index,
-          score: scoreMCQOption(option.text, answer),
+          score: scoreMCQOption(option.text, optionText),
         }))
         .filter((option) => option.score > 0)
         .sort((left, right) => right.score - left.score || left.index - right.index);
@@ -1812,8 +1853,9 @@
         "You are an expert test taker.",
         "The user is showing you a page with one or more multiple choice questions.",
         "Your goal is to identify the correct option for EVERY question.",
-        "Output ONLY a valid JSON array of strings, where each string is the EXACT TEXT of the correct option for a question, in order of appearance.",
-        "For example: [\"Option 1 text\", \"Option 2 text\"]",
+        "Output ONLY a valid JSON array of objects in question order.",
+        "Each object must have exactly two fields: option (the exact correct option text) and explanation (one short single-line explanation).",
+        "For example: [{\"option\":\"(A) Option 1\",\"explanation\":\"It satisfies the stated condition.\"}]",
         "Do not include any other text, reasoning, or markdown fences (like ```json)."
       ].join(" ");
     }
@@ -1903,12 +1945,22 @@
       finalUserMessage += [
         "Task:",
         "Identify the correct option for every multiple choice question on the page.",
-        "Return only a valid JSON array of exact option texts in page order.",
+        "Return only a valid JSON array of objects in page order.",
+        "Each object must contain option (exact correct option text) and explanation (one short single-line explanation).",
         "Return one array item per question.",
         "Do not return code, explanations, letters, or markdown.",
       ].join("\n");
     } else if (mode === "answer") {
-      finalUserMessage += "Output format: final answer first, then short key reasoning only if needed.";
+      if (isLikelyMcqContext(cleanPageText)) {
+        finalUserMessage += [
+          "This is a multiple choice page.",
+          "Answer every question in page order.",
+          "Use one single line per question in this format: (A) Correct option - short explanation.",
+          "Do not output code or markdown tables.",
+        ].join("\n");
+      } else {
+        finalUserMessage += "Output format: final answer first, then short key reasoning only if needed. Do not output code unless the user explicitly asks for code.";
+      }
     } else {
       finalUserMessage += "Output format: brief but complete explanation.";
     }
@@ -1985,8 +2037,8 @@
         : mode === "mcq"
           ? [
               "Verify every question and selected option.",
-              "Return ONLY a valid JSON array of exact option texts in page order.",
-              "Return one item per question.",
+              "Return ONLY a valid JSON array of objects in page order.",
+              "Each object must contain option (exact correct option text) and explanation (one short single-line explanation).",
               "Do not return code, explanations, letters, or markdown.",
             ].join("\n")
         : "Verify the draft answer carefully. Correct any mistakes and return a concise but complete final answer.";
@@ -2547,7 +2599,7 @@
         const answers = parseMCQAnswers(reply);
         if (!answers.length) throw new Error("The model did not return valid MCQ answers.");
         await clickCorrectMCQOptions(answers);
-        reply = JSON.stringify(answers);
+        reply = formatMCQResults(answers);
       }
 
       const liveAnswerEl = document.getElementById("sr-answer");
@@ -3008,7 +3060,11 @@
       debugHotkeyLog("hotkey accepted: Alt+Shift+A (MCQ)");
 
       runHeadlessAskForMCQ()
-        .then((answers) => clickCorrectMCQOptions(answers))
+        .then(async (answers) => {
+          const result = await clickCorrectMCQOptions(answers);
+          showMCQResults(answers);
+          return result;
+        })
         .then((result) => {
           debugHotkeyLog("mcq flow result", result);
         })
