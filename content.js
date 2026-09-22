@@ -6,8 +6,9 @@
   let GROQ_API_KEYS = [];
 
   const GROQ_MODELS = [
-    "groq/compound-mini",
-    "groq/compound",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
   ];
 
   let GEMINI_API_KEYS = [];
