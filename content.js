@@ -32,6 +32,7 @@
   let activeGeminiKeyIndex = 0;
   let activeGeminiModelIndex = 0;
   let isTypingCodeNow = false;
+  let typingCancelled = false;
   let isSmartHotkeyFlowRunning = false;
   let lastTypeTriggerAt = 0;
   let lastTypeSignature = "";
@@ -892,6 +893,7 @@
     });
 
     STATE.isLoading = true;
+    const session = beginRequestSession();
 
     try {
       if (provider === "gemini" && !GEMINI_API_KEYS.length) {
@@ -917,6 +919,7 @@
       debugHotkeyLog("mcq success", { answerCount: answers.length });
       return answers;
     } finally {
+      endRequestSession(session);
       STATE.isLoading = false;
     }
   }
@@ -1230,6 +1233,10 @@
           continue;
         }
 
+        if (typingCancelled) {
+          return { success: charsTyped > 0, charsTyped, cancelled: true };
+        }
+
         if (shouldSkipAutoClosedChar(el, content, i, ch)) {
           continue;
         }
@@ -1274,6 +1281,10 @@
         if (pendingIndentSkip && /\s/.test(ch) && pendingIndentSkip[0] === ch) {
           pendingIndentSkip = pendingIndentSkip.slice(1);
           continue;
+        }
+
+        if (typingCancelled) {
+          return { success: charsTyped > 0, charsTyped, cancelled: true };
         }
 
         if (shouldSkipAutoClosedChar(el, content, i, ch)) {
@@ -1354,12 +1365,17 @@
     lastTypeTriggerAt = now;
 
     isTypingCodeNow = true;
+    typingCancelled = false;
 
     try {
       target.focus();
       await sleep(60);
 
       const typed = await typeTextHumanLike(target, textToType);
+      if (typed.cancelled) {
+        debugHotkeyLog("typing stopped by user", typed);
+        return { success: false, reason: "Typing stopped." };
+      }
       if (typed.success) {
         debugHotkeyLog("typing done", typed);
         return { success: true };
@@ -1370,6 +1386,14 @@
     } finally {
       isTypingCodeNow = false;
     }
+  }
+
+  // Stops any in-flight AI request and any typing in progress.
+  function stopEverything() {
+    const aborted = abortActiveRequest();
+    const wasTyping = isTypingCodeNow;
+    if (wasTyping) typingCancelled = true;
+    return aborted || wasTyping;
   }
 
   function updateTypeButton(panel, message, resetDelayMs = 1400) {
@@ -1435,6 +1459,7 @@
     STATE.usePageContext = usePageContext;
     STATE.deepSolve = deepSolve;
     persistUiState();
+    const session = beginRequestSession();
 
     try {
       if (provider === "gemini" && !GEMINI_API_KEYS.length) {
@@ -1539,6 +1564,7 @@
 
       return reply;
     } finally {
+      endRequestSession(session);
       STATE.isLoading = false;
       persistUiState();
     }
@@ -2101,7 +2127,9 @@
         text.includes("auth"));
 
     const isModelUnavailable =
-      (status === 400 || status === 404) &&
+      status === 404 ||
+      text.includes("no longer available") ||
+      text.includes("deprecated") ||
       (text.includes("model") &&
         (text.includes("not found") ||
           text.includes("not supported") ||
@@ -2203,6 +2231,61 @@
     return extractGroqText(data);
   }
 
+  const REQUEST_TIMEOUT_MS = 45000;
+  let requestAbortController = null;
+
+  function beginRequestSession() {
+    requestAbortController = new AbortController();
+    return requestAbortController;
+  }
+
+  function endRequestSession(controller) {
+    if (requestAbortController === controller) requestAbortController = null;
+  }
+
+  function abortActiveRequest() {
+    if (!requestAbortController) return false;
+    requestAbortController.abort();
+    return true;
+  }
+
+  function isUserAborted() {
+    return Boolean(requestAbortController?.signal.aborted);
+  }
+
+  // Fetch that gives up after timeoutMs and can be cancelled by abortActiveRequest().
+  async function fetchWithTimeout(url, options, timeoutMs = REQUEST_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const sessionSignal = requestAbortController?.signal;
+    let timedOut = false;
+
+    const onSessionAbort = () => controller.abort();
+    if (sessionSignal) {
+      if (sessionSignal.aborted) throw new Error("Request cancelled.");
+      sessionSignal.addEventListener("abort", onSessionAbort, { once: true });
+    }
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (error) {
+      if (sessionSignal?.aborted) throw new Error("Request cancelled.");
+      if (timedOut) {
+        const timeoutError = new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+        timeoutError.isTimeout = true;
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      sessionSignal?.removeEventListener("abort", onSessionAbort);
+    }
+  }
+
   async function requestGeminiWithKeyRotation(
     messages,
     { temperature = 0.2, maxCompletionTokens = 1200, thinkingBudget = -1 } = {}
@@ -2245,7 +2328,7 @@
         let res;
 
         try {
-          res = await fetch(
+          res = await fetchWithTimeout(
             `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
               modelName
             )}:generateContent`,
@@ -2259,6 +2342,13 @@
             }
           );
         } catch (error) {
+          if (isUserAborted()) throw new Error("Request cancelled.");
+          if (error?.isTimeout) {
+            // Slow model: move on to the next one instead of hanging.
+            lastError = new Error(`Gemini model ${modelName} ${error.message}`);
+            activeGeminiModelIndex = (modelIndex + 1) % GEMINI_MODELS.length;
+            break;
+          }
           throw new Error(`Network error while contacting Gemini: ${error?.message || "Request failed"}`);
         }
 
@@ -2330,7 +2420,7 @@
         let res;
 
         try {
-          res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          res = await fetchWithTimeout("https://api.groq.com/openai/v1/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -2344,6 +2434,12 @@
             }),
           });
         } catch (error) {
+          if (isUserAborted()) throw new Error("Request cancelled.");
+          if (error?.isTimeout) {
+            lastError = new Error(`Groq model ${modelName} ${error.message}`);
+            activeGroqModelIndex = (modelIndex + 1) % GROQ_MODELS.length;
+            break;
+          }
           throw new Error(`Network error while contacting Groq: ${error?.message || "Request failed"}`);
         }
 
@@ -2471,9 +2567,11 @@
 
     persistUiState();
 
+    const session = beginRequestSession();
+
     if (btn) {
-      btn.disabled = true;
-      btn.textContent = "...";
+      btn.disabled = false;
+      btn.textContent = "stop";
     }
 
     if (answerEl) {
@@ -2629,6 +2727,7 @@
 
       updateCopyButton(document.getElementById("__sr-panel"), "", "sr-answer sr-error");
     } finally {
+      endRequestSession(session);
       STATE.isLoading = false;
       persistUiState();
 
@@ -2798,8 +2897,8 @@
 
       const askBtn = panel.querySelector("#sr-ask-btn");
       if (askBtn) {
-        askBtn.disabled = true;
-        askBtn.textContent = "...";
+        askBtn.disabled = false;
+        askBtn.textContent = "stop";
       }
 
       updateCopyButton(panel, "", "sr-answer sr-loading");
@@ -2936,6 +3035,8 @@
 
       if (result.success) {
         updateTypeButton(panel, result.usedFallback ? "inserted ✓" : "typed ✓");
+      } else if (result.reason === "Typing stopped.") {
+        updateTypeButton(panel, "stopped", 1200);
       } else {
         updateTypeButton(panel, "focus editor", 1500);
       }
@@ -2943,11 +3044,16 @@
 
     panel.querySelector("#sr-clear-btn")?.addEventListener("click", (e) => {
       e.stopPropagation();
+      stopEverything();
       clearConversation(panel);
     });
 
     panel.querySelector("#sr-ask-btn")?.addEventListener("click", async (e) => {
       e.stopPropagation();
+      if (STATE.isLoading) {
+        stopEverything();
+        return;
+      }
       await runAsk(panel);
     });
 
@@ -3010,6 +3116,30 @@
   loadUiState();
   injectTab();
   logBodyText();
+
+  // Alt+Shift+` (backtick) stops any in-flight AI request and any typing.
+  // Alt+Shift+X is a backup in case the OS/layout swallows the backtick combo.
+  function handleStopHotkey(e) {
+    if (!e.altKey || !e.shiftKey) return false;
+    const key = String(e.key || "");
+    const isStopKey =
+      e.code === "Backquote" ||
+      e.code === "IntlBackslash" ||
+      key === "`" ||
+      key === "~" ||
+      key === "Dead" ||
+      e.code === "KeyX";
+    if (!isStopKey) return false;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const stopped = stopEverything();
+    debugHotkeyLog("stop hotkey", { type: e.type, code: e.code, key, stopped });
+    return true;
+  }
+
+  window.addEventListener("keyup", handleStopHotkey, true);
+  window.addEventListener("keydown", handleStopHotkey, true);
 
   document.addEventListener("keydown", (e) => {
     if (e.altKey && e.shiftKey && HOTKEY_DEBUG) {
