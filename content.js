@@ -41,7 +41,7 @@
   const TOGGLE_HOTKEY_KEY = "H";
   const SMART_ACTION_HOTKEY_KEY = "Q";
   const SMART_MCQ_HOTKEY_KEY = "A";
-  const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG !== false;
+  const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG === true;
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
   const MAX_PAGE_CONTEXT_CHARS = 10000;
@@ -903,6 +903,102 @@
     return resultText;
   }
 
+  // Reads the page and builds the prompt context + difficulty for any entry point.
+  function preparePrompt({ mode, usePageContext, customQuestion, selectedText }) {
+    const rawBodyText = usePageContext ? getBodyText() : "";
+    const bodyText = usePageContext
+      ? buildRelevantPageContext(
+          rawBodyText,
+          customQuestion,
+          selectedText,
+          mode === "mcq" ? MCQ_PAGE_CONTEXT_CHARS : MAX_PAGE_CONTEXT_CHARS
+        )
+      : "";
+
+    return { bodyText, difficulty: inferDifficulty(customQuestion, mode, bodyText) };
+  }
+
+  // The one request pipeline shared by the panel button and both hotkeys:
+  // first pass -> optional verification -> code-only repair.
+  async function generateReply({ mode, bodyText, customQuestion, usePageContext, deepSolve, difficulty }) {
+    const provider = deepSolve ? "gemini" : "groq";
+
+    if (provider === "gemini" && !GEMINI_API_KEYS.length) {
+      throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
+    }
+
+    const callModel = (messages, { temperature, isVerificationPass, minTokens = 0 }) => {
+      const maxCompletionTokens = Math.max(
+        minTokens,
+        getMaxCompletionTokens(mode, difficulty, isVerificationPass)
+      );
+
+      return provider === "gemini"
+        ? requestGeminiWithKeyRotation(messages, {
+            temperature,
+            maxCompletionTokens,
+            thinkingBudget: getGeminiThinkingBudget(difficulty, mode, isVerificationPass),
+          })
+        : requestGroqWithKeyRotation(messages, { temperature, maxCompletionTokens });
+    };
+
+    const firstPass = await callModel(
+      buildMessages({ bodyText, customQuestion, mode, usePageContext, deepSolve, difficulty }),
+      { temperature: mode === "code" ? 0.1 : 0.2, isVerificationPass: false }
+    );
+
+    let reply = sanitizeReply(extractProviderText(provider, firstPass.data) || "No response.", mode);
+
+    const needsVerification =
+      (mode !== "mcq" && shouldRunDeepSolve({ deepSolve, mode, customQuestion, difficulty })) ||
+      (provider === "gemini" && isGeminiOutputCutOff(firstPass.data)) ||
+      (mode !== "mcq" && isLowConfidenceReply(reply, mode)) ||
+      (mode === "code" && isLikelyIncompleteCode(reply));
+
+    if (needsVerification) {
+      const secondPass = await callModel(
+        buildVerificationMessages({ bodyText, customQuestion, mode, usePageContext, draftReply: reply }),
+        { temperature: 0.1, isVerificationPass: true }
+      );
+
+      const verifiedReply = sanitizeReply(extractProviderText(provider, secondPass.data) || "", mode);
+      if (verifiedReply) reply = verifiedReply;
+    }
+
+    if (mode === "code" && !isCodeOnlyReplyValid(reply)) {
+      const repairPass = await callModel(
+        buildCodeOnlyRepairMessages({ bodyText, customQuestion, usePageContext, draftReply: reply }),
+        { temperature: 0.1, isVerificationPass: true, minTokens: 1800 }
+      );
+
+      const repairedReply = sanitizeReply(extractProviderText(provider, repairPass.data) || "", mode);
+
+      if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
+        reply = repairedReply;
+      }
+    }
+
+    return reply;
+  }
+
+  // Loading flag + abort session + panel reset around any hotkey-driven request.
+  async function runWithRequestSession(task) {
+    STATE.isLoading = true;
+    const session = beginRequestSession();
+
+    try {
+      return await task();
+    } catch (error) {
+      syncPanelAfterRequest(error?.message);
+      throw error;
+    } finally {
+      endRequestSession(session);
+      STATE.isLoading = false;
+      persistUiState();
+      syncPanelAfterRequest();
+    }
+  }
+
   async function runHeadlessAskForMCQ() {
     if (STATE.isLoading) {
       debugHotkeyLog("mcq skipped: assistant already loading");
@@ -916,56 +1012,28 @@
     const deepSolve = STATE.deepSolve !== false;
     const selectedText = getSelectedText();
     const customQuestion = selectedText || "";
-
-    const rawBodyText = usePageContext ? getBodyText() : "";
-    const bodyText = usePageContext
-      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText, MCQ_PAGE_CONTEXT_CHARS)
-      : "";
-
-    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
-    const provider = deepSolve ? "gemini" : "groq";
-
-    const messages = buildMessages({
-      bodyText,
-      customQuestion,
-      mode,
-      usePageContext,
-      deepSolve,
-      difficulty,
-    });
+    const { bodyText, difficulty } = preparePrompt({ mode, usePageContext, customQuestion, selectedText });
 
     debugHotkeyLog("mcq start", {
-      provider,
+      provider: deepSolve ? "gemini" : "groq",
       deepSolve,
       difficulty,
       selectedChars: selectedText.length,
       contextChars: bodyText.length,
     });
 
-    STATE.isLoading = true;
-    const session = beginRequestSession();
+    return runWithRequestSession(async () => {
+      const reply = await generateReply({
+        mode,
+        bodyText,
+        customQuestion,
+        usePageContext,
+        deepSolve,
+        difficulty,
+      });
 
-    try {
-      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
-        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
-      }
-
-      const response =
-        provider === "gemini"
-          ? await requestGeminiWithKeyRotation(messages, {
-              temperature: 0.1,
-              maxCompletionTokens: 8192,
-              thinkingBudget: deepSolve ? 2048 : 0,
-            })
-          : await requestGroqWithKeyRotation(messages, {
-              temperature: 0.1,
-              maxCompletionTokens: 4096,
-            });
-
-      let reply = sanitizeReply(extractProviderText(provider, response.data) || "", mode);
-      
       const answers = parseMCQAnswers(reply);
-      
+
       if (!answers.length) {
         console.warn("[SR-EXT] MCQ reply could not be parsed:", reply.slice(0, 600));
         throw new Error("The model did not return valid MCQ answers.");
@@ -973,16 +1041,7 @@
 
       debugHotkeyLog("mcq success", { answerCount: answers.length });
       return answers;
-    } catch (error) {
-      endRequestSession(session);
-      STATE.isLoading = false;
-      syncPanelAfterRequest(error?.message);
-      throw error;
-    } finally {
-      endRequestSession(session);
-      STATE.isLoading = false;
-      syncPanelAfterRequest();
-    }
+    });
   }
 
   function normalizeMCQText(value) {
@@ -1739,133 +1798,31 @@
     const deepSolve = STATE.deepSolve !== false;
     const selectedText = getSelectedText();
     const customQuestion = selectedText || "";
-
-    const rawBodyText = usePageContext ? getBodyText() : "";
-    const bodyText = usePageContext
-      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
-      : "";
-
-    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
-    const runVerificationPass =
-      mode !== "mcq" &&
-      shouldRunDeepSolve({
-        deepSolve,
-        mode,
-        customQuestion,
-        difficulty,
-      });
-    const provider = deepSolve ? "gemini" : "groq";
-
-    const messages = buildMessages({
-      bodyText,
-      customQuestion,
-      mode,
-      usePageContext,
-      deepSolve,
-      difficulty,
-    });
+    const { bodyText, difficulty } = preparePrompt({ mode, usePageContext, customQuestion, selectedText });
 
     debugHotkeyLog("ask start", {
-      provider,
+      provider: deepSolve ? "gemini" : "groq",
       deepSolve,
       difficulty,
       selectedChars: selectedText.length,
       contextChars: bodyText.length,
     });
 
-    STATE.isLoading = true;
     STATE.mode = mode;
     STATE.usePageContext = usePageContext;
     STATE.deepSolve = deepSolve;
-    persistUiState();
-    const session = beginRequestSession();
-    syncPanelLoadingStart();
 
-    try {
-      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
-        debugHotkeyLog("ask failed: missing gemini key");
-        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
-      }
+    return runWithRequestSession(async () => {
+      syncPanelLoadingStart();
 
-      const firstPass =
-        provider === "gemini"
-          ? await requestGeminiWithKeyRotation(messages, {
-              temperature: 0.1,
-              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
-              thinkingBudget: getGeminiThinkingBudget(difficulty, mode, false),
-            })
-          : await requestGroqWithKeyRotation(messages, {
-              temperature: 0.1,
-              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
-            });
-
-      let reply = sanitizeReply(
-        extractProviderText(provider, firstPass.data) || "No response.",
-        mode
-      );
-
-      const firstPassCutOff =
-        provider === "gemini" && isGeminiOutputCutOff(firstPass.data);
-
-      if (
-        runVerificationPass ||
-        firstPassCutOff ||
-        isLowConfidenceReply(reply, mode) ||
-        isLikelyIncompleteCode(reply)
-      ) {
-        const verifyMessages = buildVerificationMessages({
-          bodyText,
-          customQuestion,
-          mode,
-          usePageContext,
-          draftReply: reply,
-        });
-
-        const secondPass =
-          provider === "gemini"
-            ? await requestGeminiWithKeyRotation(verifyMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
-                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
-              })
-            : await requestGroqWithKeyRotation(verifyMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
-              });
-
-        const verifiedReply = sanitizeReply(extractProviderText(provider, secondPass.data) || "", mode);
-        if (verifiedReply) reply = verifiedReply;
-      }
-
-      if (mode === "code" && !isCodeOnlyReplyValid(reply)) {
-        const repairMessages = buildCodeOnlyRepairMessages({
-          bodyText,
-          customQuestion,
-          usePageContext,
-          draftReply: reply,
-        });
-
-        const repairPass =
-          provider === "gemini"
-            ? await requestGeminiWithKeyRotation(repairMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
-                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
-              })
-            : await requestGroqWithKeyRotation(repairMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
-              });
-
-        const repairedReply = sanitizeReply(
-          extractProviderText(provider, repairPass.data) || "",
-          mode
-        );
-
-        if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
-          reply = repairedReply;
-        }
-      }
+      const reply = await generateReply({
+        mode,
+        bodyText,
+        customQuestion,
+        usePageContext,
+        deepSolve,
+        difficulty,
+      });
 
       STATE.answerText = reply;
       STATE.answerClass = "sr-answer";
@@ -1883,17 +1840,7 @@
       }
 
       return reply;
-    } catch (error) {
-      endRequestSession(session);
-      STATE.isLoading = false;
-      syncPanelAfterRequest(error?.message);
-      throw error;
-    } finally {
-      endRequestSession(session);
-      STATE.isLoading = false;
-      persistUiState();
-      syncPanelAfterRequest();
-    }
+    });
   }
 
   // Force-insert text into any element (input, textarea, contenteditable, code editors)
@@ -2928,123 +2875,23 @@
 
     updateCopyButton(panel, "", "sr-answer sr-loading");
 
-    const rawBodyText = usePageContext ? getBodyText() : "";
-    const selectedText = usePageContext ? getSelectedText() : "";
-    const bodyText = usePageContext
-      ? buildRelevantPageContext(
-          rawBodyText,
-          customQuestion,
-          selectedText,
-          mode === "mcq" ? MCQ_PAGE_CONTEXT_CHARS : MAX_PAGE_CONTEXT_CHARS
-        )
-      : "";
-    const difficulty = inferDifficulty(customQuestion, mode, bodyText);
-    const runVerificationPass =
-      mode !== "mcq" &&
-      shouldRunDeepSolve({
-        deepSolve,
+    try {
+      const selectedText = usePageContext ? getSelectedText() : "";
+      const { bodyText, difficulty } = preparePrompt({
         mode,
+        usePageContext,
         customQuestion,
+        selectedText,
+      });
+
+      let reply = await generateReply({
+        mode,
+        bodyText,
+        customQuestion,
+        usePageContext,
+        deepSolve,
         difficulty,
       });
-    const provider = deepSolve ? "gemini" : "groq";
-
-    const messages = buildMessages({
-      bodyText,
-      customQuestion,
-      mode,
-      usePageContext,
-      deepSolve,
-      difficulty,
-    });
-
-    try {
-      if (provider === "gemini" && !GEMINI_API_KEYS.length) {
-        throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
-      }
-
-      const firstPass =
-        provider === "gemini"
-          ? await requestGeminiWithKeyRotation(messages, {
-              temperature: mode === "code" ? 0.1 : 0.2,
-              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
-              thinkingBudget: getGeminiThinkingBudget(difficulty, mode, false),
-            })
-          : await requestGroqWithKeyRotation(messages, {
-              temperature: mode === "code" ? 0.1 : 0.2,
-              maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, false),
-            });
-
-      let reply = sanitizeReply(
-        extractProviderText(provider, firstPass.data) || "No response.",
-        mode
-      );
-
-      const firstPassCutOff =
-        provider === "gemini" && isGeminiOutputCutOff(firstPass.data);
-
-      if (
-        runVerificationPass ||
-        firstPassCutOff ||
-        (mode !== "mcq" && isLowConfidenceReply(reply, mode)) ||
-        (mode === "code" && isLikelyIncompleteCode(reply))
-      ) {
-        const verifyMessages = buildVerificationMessages({
-          bodyText,
-          customQuestion,
-          mode,
-          usePageContext,
-          draftReply: reply,
-        });
-
-        const secondPass =
-          provider === "gemini"
-            ? await requestGeminiWithKeyRotation(verifyMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
-                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
-              })
-            : await requestGroqWithKeyRotation(verifyMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: getMaxCompletionTokens(mode, difficulty, true),
-              });
-
-        const verifiedReply = sanitizeReply(extractProviderText(provider, secondPass.data) || "", mode);
-
-        if (verifiedReply) {
-          reply = verifiedReply;
-        }
-      }
-
-      if (mode === "code" && !isCodeOnlyReplyValid(reply)) {
-        const repairMessages = buildCodeOnlyRepairMessages({
-          bodyText,
-          customQuestion,
-          usePageContext,
-          draftReply: reply,
-        });
-
-        const repairPass =
-          provider === "gemini"
-            ? await requestGeminiWithKeyRotation(repairMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
-                thinkingBudget: getGeminiThinkingBudget(difficulty, mode, true),
-              })
-            : await requestGroqWithKeyRotation(repairMessages, {
-                temperature: 0.1,
-                maxCompletionTokens: Math.max(1800, getMaxCompletionTokens(mode, difficulty, true)),
-              });
-
-        const repairedReply = sanitizeReply(
-          extractProviderText(provider, repairPass.data) || "",
-          mode
-        );
-
-        if (repairedReply && isCodeOnlyReplyValid(repairedReply) && !isLikelyIncompleteCode(repairedReply)) {
-          reply = repairedReply;
-        }
-      }
 
       if (mode === "mcq") {
         const answers = parseMCQAnswers(reply);
