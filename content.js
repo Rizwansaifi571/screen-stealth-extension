@@ -45,6 +45,7 @@
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
   const MAX_PAGE_CONTEXT_CHARS = 10000;
+  const MCQ_PAGE_CONTEXT_CHARS = 24000;
   const MAX_SELECTED_TEXT_CHARS = 1400;
   const STOPWORDS = new Set([
     "a",
@@ -353,6 +354,11 @@
     });
   }
 
+  function isAltShiftKey(e, letter) {
+    if (!e.altKey || !e.shiftKey) return false;
+    return String(e.key || "").toUpperCase() === letter || e.code === `Key${letter}`;
+  }
+
   function setWidgetHidden(hidden) {
     STATE.isWidgetHidden = hidden;
 
@@ -373,7 +379,16 @@
   }
 
   function getBodyText() {
-    return (document.body?.innerText || "").trim();
+    // innerText skips visibility:hidden nodes, so hide our own widget while reading
+    // (no repaint happens in between) to keep previous answers out of the prompt.
+    const own = [document.getElementById("__sr-panel"), document.getElementById("__sr-tab")].filter(Boolean);
+    const previous = own.map((el) => el.style.visibility);
+    own.forEach((el) => (el.style.visibility = "hidden"));
+    try {
+      return (document.body?.innerText || "").trim();
+    } finally {
+      own.forEach((el, i) => (el.style.visibility = previous[i]));
+    }
   }
 
   function logBodyText() {
@@ -473,13 +488,18 @@
     return score;
   }
 
-  function buildRelevantPageContext(rawBodyText, customQuestion, selectedText) {
+  function buildRelevantPageContext(
+    rawBodyText,
+    customQuestion,
+    selectedText,
+    maxContextChars = MAX_PAGE_CONTEXT_CHARS
+  ) {
     const cleanBody = normalizeWhitespace(String(rawBodyText || "").slice(0, MAX_RAW_PAGE_TEXT_CHARS));
     const cleanSelected = normalizeWhitespace(selectedText).slice(0, MAX_SELECTED_TEXT_CHARS);
     if (!cleanBody && !cleanSelected) return "";
 
     const tokens = tokenizeForRetrieval(customQuestion);
-    let coreContext = cleanBody.slice(0, MAX_PAGE_CONTEXT_CHARS);
+    let coreContext = cleanBody.slice(0, maxContextChars);
 
     if (tokens.length && cleanBody) {
       const candidates = splitContextCandidates(cleanBody);
@@ -498,13 +518,13 @@
           if (seen.has(key)) continue;
 
           const nextCost = item.chunk.length + 2;
-          if (usedChars + nextCost > MAX_PAGE_CONTEXT_CHARS) continue;
+          if (usedChars + nextCost > maxContextChars) continue;
 
           seen.add(key);
           chosen.push(item);
           usedChars += nextCost;
 
-          if (chosen.length >= 18 || usedChars >= MAX_PAGE_CONTEXT_CHARS * 0.92) break;
+          if (chosen.length >= 18 || usedChars >= maxContextChars * 0.92) break;
         }
 
         if (chosen.length) {
@@ -514,7 +534,7 @@
       }
     }
 
-    if (!cleanSelected) return coreContext.slice(0, MAX_PAGE_CONTEXT_CHARS);
+    if (!cleanSelected) return coreContext.slice(0, maxContextChars);
 
     const wrapped = [
       "Selected text (highest priority):",
@@ -524,7 +544,7 @@
       coreContext,
     ].join("\n");
 
-    return wrapped.slice(0, MAX_PAGE_CONTEXT_CHARS);
+    return wrapped.slice(0, maxContextChars);
   }
 
   function inferDifficulty(customQuestion, mode, bodyText) {
@@ -669,7 +689,7 @@
     }
 
     if (mode === "mcq") {
-      return isVerificationPass ? 1500 : 1000;
+      return 8192;
     }
 
     if (mode === "explain") {
@@ -802,42 +822,71 @@
     "'": "'",
   };
 
+  function toMCQOptionList(answer) {
+    if (typeof answer === "string") return answer.trim() ? [answer.trim()] : [];
+    if (Array.isArray(answer?.options) && answer.options.length) {
+      return answer.options.map((x) => String(x || "").trim()).filter(Boolean);
+    }
+    return answer?.option ? [String(answer.option).trim()].filter(Boolean) : [];
+  }
+
   function parseMCQAnswers(reply) {
     const cleanReply = String(reply || "").trim().replace(/^```json\s*/i, "").replace(/```$/g, "").trim();
 
-    try {
-      const jsonMatch = cleanReply.match(/\[[\s\S]*\]/);
-      const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleanReply);
+    const normalizeItems = (parsed) => {
       if (!Array.isArray(parsed)) return [];
 
       return parsed
         .map((item) => {
           if (typeof item === "string") {
-            return { option: item.trim(), explanation: "" };
+            return { option: item.trim(), options: [item.trim()].filter(Boolean), explanation: "" };
           }
 
+          // "option" may be one string, or an array when several answers are correct
+          const raw = item?.option ?? item?.answer ?? item?.text ?? item?.options ?? "";
+          const options = (Array.isArray(raw) ? raw : [raw])
+            .map((x) => String(x || "").trim())
+            .filter(Boolean);
+
           return {
-            option: String(item?.option || item?.answer || item?.text || "").trim(),
+            option: options.join(" | "),
+            options,
             explanation: String(item?.explanation || item?.reason || "").trim(),
           };
         })
-        .filter((item) => item.option);
+        .filter((item) => item.options.length);
+    };
+
+    try {
+      const jsonMatch = cleanReply.match(/\[[\s\S]*\]/);
+      return normalizeItems(JSON.parse(jsonMatch ? jsonMatch[0] : cleanReply));
     } catch {
-      return [];
+      // Truncated or chatty output: keep every complete {...} object that still parses
+      const salvaged = [];
+      for (const chunk of cleanReply.match(/\{[^{}]*\}/g) || []) {
+        try {
+          salvaged.push(JSON.parse(chunk));
+        } catch {
+          // skip broken chunk
+        }
+      }
+      return normalizeItems(salvaged);
     }
   }
 
-  function formatMCQResults(answers) {
+  function formatMCQResults(answers, clickResult) {
     return answers
       .map((answer, index) => {
         const explanation = answer.explanation ? ` - ${answer.explanation}` : "";
-        return `${index + 1}. ${answer.option}${explanation}`;
+        const matched = clickResult?.perAnswer?.[index]?.matched;
+        const mark = matched === false ? " [not found on page]" : "";
+        return `${index + 1}. ${answer.option}${explanation}${mark}`;
       })
       .join("\n");
   }
 
-  function showMCQResults(answers) {
-    const resultText = formatMCQResults(answers);
+  function showMCQResults(answers, clickResult) {
+    const resultText = formatMCQResults(answers, clickResult);
     STATE.answerText = resultText;
     STATE.answerClass = "sr-answer";
     STATE.mode = "mcq";
@@ -854,7 +903,6 @@
     return resultText;
   }
 
-  
   async function runHeadlessAskForMCQ() {
     if (STATE.isLoading) {
       debugHotkeyLog("mcq skipped: assistant already loading");
@@ -871,7 +919,7 @@
 
     const rawBodyText = usePageContext ? getBodyText() : "";
     const bodyText = usePageContext
-      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
+      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText, MCQ_PAGE_CONTEXT_CHARS)
       : "";
 
     const difficulty = inferDifficulty(customQuestion, mode, bodyText);
@@ -906,18 +954,23 @@
         provider === "gemini"
           ? await requestGeminiWithKeyRotation(messages, {
               temperature: 0.1,
-              maxCompletionTokens: 1000,
-              thinkingBudget: deepSolve ? 1024 : 0,
+              maxCompletionTokens: 8192,
+              thinkingBudget: deepSolve ? 2048 : 0,
             })
           : await requestGroqWithKeyRotation(messages, {
               temperature: 0.1,
-              maxCompletionTokens: 1000,
+              maxCompletionTokens: 4096,
             });
 
       let reply = sanitizeReply(extractProviderText(provider, response.data) || "", mode);
       
       const answers = parseMCQAnswers(reply);
       
+      if (!answers.length) {
+        console.warn("[SR-EXT] MCQ reply could not be parsed:", reply.slice(0, 600));
+        throw new Error("The model did not return valid MCQ answers.");
+      }
+
       debugHotkeyLog("mcq success", { answerCount: answers.length });
       return answers;
     } catch (error) {
@@ -952,7 +1005,7 @@
   function getMCQOptionElements() {
     const elements = Array.from(
       document.querySelectorAll(
-        'label, button, [role="radio"], [role="option"], input[type="radio"], input[type="checkbox"], [onclick]'
+        'label, button, [role="radio"], [role="option"], [role="checkbox"], input[type="radio"], input[type="checkbox"], [onclick]'
       )
     );
     const seen = new Set();
@@ -966,7 +1019,7 @@
         : element.querySelector('input[type="radio"], input[type="checkbox"]');
       const clickable = input?.closest("label") || element;
       const text = normalizeMCQText(clickable.textContent || element.getAttribute("aria-label"));
-      if (!text || seen.has(clickable)) continue;
+      if (!text || text.length > 600 || seen.has(clickable)) continue;
 
       seen.add(clickable);
       options.push({ element: clickable, text, input });
@@ -974,6 +1027,32 @@
 
     return options;
   }
+
+  // Options that belong to the same question share a radio name, or the closest ancestor
+  // that contains more than one option. Groups come back in page order.
+  function groupMCQOptions(options) {
+    const groups = new Map();
+
+    for (const option of options) {
+      let key = option.input?.type === "radio" && option.input.name ? `name:${option.input.name}` : null;
+
+      if (!key) {
+        let node = option.element.parentElement;
+        while (node && node !== document.body) {
+          if (options.some((other) => other !== option && node.contains(other.element))) break;
+          node = node.parentElement;
+        }
+        key = node || document.body;
+      }
+
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(option);
+    }
+
+    return Array.from(groups.values()).filter((group) => group.length >= 2);
+  }
+
+  const MCQ_MIN_MATCH_SCORE = 55;
 
   function scoreMCQOption(optionText, answerText) {
     const option = normalizeMCQText(optionText);
@@ -983,6 +1062,10 @@
     if (!option || !answer) return 0;
     if (option === answer) return 100;
     if (optionBody === answerBody) return 98;
+
+    // Reject big containers that merely mention the answer text
+    if (option.length > answer.length * 4 + 60) return 0;
+
     if (option.includes(answer) && answer.length > 3) return 80 - Math.min(20, (option.length - answer.length) / 10);
     if (answer.includes(option) && option.length > 5) return 60 - Math.min(20, (answer.length - option.length) / 10);
     if (optionBody.includes(answerBody) && answerBody.length > 3) return 78;
@@ -990,48 +1073,137 @@
     return 0;
   }
 
+  function bestMCQMatch(candidates, answerText, used) {
+    let best = null;
+    candidates.forEach((option, index) => {
+      if (used.has(option.element)) return;
+      const score = scoreMCQOption(option.text, answerText);
+      if (score < MCQ_MIN_MATCH_SCORE) return;
+      if (!best || score > best.score) best = { ...option, index, score };
+    });
+    return best;
+  }
+
+  // Last resort for sites whose options are plain divs/spans/list items with no label or role.
+  function findMCQTextFallback(answerText, used) {
+    const target = normalizeMCQOptionText(normalizeMCQText(answerText));
+    if (target.length < 2) return null;
+
+    let best = null;
+    const nodes = document.querySelectorAll(
+      'li, div, span, p, td, a, [class*="option" i], [class*="choice" i], [class*="answer" i]'
+    );
+
+    for (const node of nodes) {
+      if (used.has(node) || !isMCQOptionVisible(node)) continue;
+      const text = normalizeMCQText(node.textContent);
+      if (!text || text.length > target.length * 2 + 20) continue;
+
+      const score = scoreMCQOption(text, answerText);
+      if (score < 70) continue;
+
+      const adjusted = score - text.length / 50;
+      if (!best || adjusted > best.adjusted) best = { node, adjusted, text };
+    }
+
+    if (!best) return null;
+
+    const clickable =
+      best.node.closest('label, button, [role="radio"], [role="option"], [role="checkbox"], [onclick], a') ||
+      best.node;
+    const input = clickable.querySelector?.('input[type="radio"], input[type="checkbox"]') || null;
+    return { element: clickable, text: best.text, input };
+  }
+
+  let mcqCancelled = false;
+  let isMcqClickingNow = false;
+
+  async function clickMCQOption(option) {
+    // Never toggle something that is already selected (a second click would un-check a checkbox)
+    if (option.input?.checked) return;
+
+    option.element.scrollIntoView({ behavior: "smooth", block: "center" });
+    await sleep(220 + Math.floor(Math.random() * 160));
+    option.element.click();
+    if (option.input && !option.input.checked) option.input.click();
+    await sleep(220 + Math.floor(Math.random() * 160));
+  }
+
   async function clickCorrectMCQOptions(answers) {
     if (!Array.isArray(answers) || answers.length === 0) {
-      return { success: false, reason: "Empty answers" };
+      return { success: false, reason: "Empty answers", perAnswer: [] };
     }
 
-    const options = getMCQOptionElements();
-    const used = new Set();
-    let clickedCount = 0;
-    const clickedTexts = [];
+    mcqCancelled = false;
+    isMcqClickingNow = true;
 
-    for (const answer of answers) {
-      const optionText = typeof answer === "string" ? answer : answer?.option;
-      if (typeof optionText !== "string" || !optionText.trim()) continue;
+    try {
+      const options = getMCQOptionElements();
+      const groups = groupMCQOptions(options);
+      const used = new Set();
+      const perAnswer = [];
+      const clickedTexts = [];
+      let clickedCount = 0;
+      let cursor = 0;
 
-      const candidates = options
-        .filter((option) => !used.has(option.element))
-        .map((option, index) => ({
-          ...option,
-          index,
-          score: scoreMCQOption(option.text, optionText),
-        }))
-        .filter((option) => option.score > 0)
-        .sort((left, right) => right.score - left.score || left.index - right.index);
+      const scoreGroup = (group, wanted) =>
+        wanted.reduce((sum, text) => sum + (bestMCQMatch(group, text, used)?.score || 0), 0);
 
-      const best = candidates[0];
-      if (!best) continue;
+      for (let i = 0; i < answers.length; i += 1) {
+        if (mcqCancelled) break;
 
-      try {
-        best.element.scrollIntoView({ behavior: "smooth", block: "center" });
-        await sleep(250);
-        best.element.click();
-        if (best.input && !best.input.checked) best.input.click();
-        used.add(best.element);
-        clickedCount += 1;
-        clickedTexts.push(best.text);
-        await sleep(250);
-      } catch (error) {
-        console.warn("Failed to select MCQ option:", error);
+        const wanted = toMCQOptionList(answers[i]);
+        let matchedAny = false;
+
+        // Pick the question group this answer belongs to: same position first, then page order
+        let groupIndex = -1;
+        if (groups.length === answers.length && scoreGroup(groups[i], wanted) > 0) {
+          groupIndex = i;
+        } else {
+          let bestScore = 0;
+          groups.forEach((group, idx) => {
+            const raw = scoreGroup(group, wanted);
+            if (raw <= 0) return;
+            const adjusted = raw + (idx >= cursor ? 5 : 0) - Math.abs(idx - cursor) * 0.01;
+            if (adjusted > bestScore) {
+              bestScore = adjusted;
+              groupIndex = idx;
+            }
+          });
+        }
+
+        for (const text of wanted) {
+          if (mcqCancelled) break;
+
+          const pool = groupIndex >= 0 ? groups[groupIndex] : options;
+          const target = bestMCQMatch(pool, text, used) || findMCQTextFallback(text, used);
+          if (!target) continue;
+
+          try {
+            await clickMCQOption(target);
+            used.add(target.element);
+            clickedCount += 1;
+            clickedTexts.push(target.text);
+            matchedAny = true;
+          } catch (error) {
+            console.warn("Failed to select MCQ option:", error);
+          }
+        }
+
+        if (groupIndex >= 0) cursor = groupIndex + 1;
+        perAnswer.push({ matched: matchedAny });
       }
-    }
 
-    return { success: clickedCount > 0, clickedCount, clickedTexts };
+      return {
+        success: clickedCount > 0,
+        clickedCount,
+        clickedTexts,
+        perAnswer,
+        cancelled: mcqCancelled,
+      };
+    } finally {
+      isMcqClickingNow = false;
+    }
   }
 
   function getEditorTextSnapshot(el) {
@@ -1538,7 +1710,9 @@
     const aborted = abortActiveRequest();
     const wasTyping = isTypingCodeNow;
     if (wasTyping) typingCancelled = true;
-    return aborted || wasTyping;
+    const wasClicking = isMcqClickingNow;
+    if (wasClicking) mcqCancelled = true;
+    return aborted || wasTyping || wasClicking;
   }
 
   function updateTypeButton(panel, message, resetDelayMs = 1400) {
@@ -2033,7 +2207,7 @@
         "The user is showing you a page with one or more multiple choice questions.",
         "Your goal is to identify the correct option for EVERY question.",
         "Output ONLY a valid JSON array of objects in question order.",
-        "Each object must have exactly two fields: option (the exact correct option text) and explanation (one short single-line explanation).",
+        "Each object must have exactly two fields: option (the exact correct option text; if the question allows several correct answers use an array of exact option texts) and explanation (at most 10 words).",
         "For example: [{\"option\":\"(A) Option 1\",\"explanation\":\"It satisfies the stated condition.\"}]",
         "Do not include any other text, reasoning, or markdown fences (like ```json)."
       ].join(" ");
@@ -2125,8 +2299,8 @@
         "Task:",
         "Identify the correct option for every multiple choice question on the page.",
         "Return only a valid JSON array of objects in page order.",
-        "Each object must contain option (exact correct option text) and explanation (one short single-line explanation).",
-        "Return one array item per question.",
+        "Each object must contain option (exact correct option text, or an array of exact option texts when several answers are correct) and explanation (at most 10 words).",
+        "Return one array item per question, in the order the questions appear on the page, including questions that repeat the same option texts.",
         "Do not return code, explanations, letters, or markdown.",
       ].join("\n");
     } else if (mode === "answer") {
@@ -2757,7 +2931,12 @@
     const rawBodyText = usePageContext ? getBodyText() : "";
     const selectedText = usePageContext ? getSelectedText() : "";
     const bodyText = usePageContext
-      ? buildRelevantPageContext(rawBodyText, customQuestion, selectedText)
+      ? buildRelevantPageContext(
+          rawBodyText,
+          customQuestion,
+          selectedText,
+          mode === "mcq" ? MCQ_PAGE_CONTEXT_CHARS : MAX_PAGE_CONTEXT_CHARS
+        )
       : "";
     const difficulty = inferDifficulty(customQuestion, mode, bodyText);
     const runVerificationPass =
@@ -2869,9 +3048,12 @@
 
       if (mode === "mcq") {
         const answers = parseMCQAnswers(reply);
-        if (!answers.length) throw new Error("The model did not return valid MCQ answers.");
-        await clickCorrectMCQOptions(answers);
-        reply = formatMCQResults(answers);
+        if (!answers.length) {
+          console.warn("[SR-EXT] MCQ reply could not be parsed:", reply.slice(0, 600));
+          throw new Error("The model did not return valid MCQ answers.");
+        }
+        const clickResult = await clickCorrectMCQOptions(answers);
+        reply = formatMCQResults(answers, clickResult);
       }
 
       const liveAnswerEl = document.getElementById("sr-answer");
@@ -3326,13 +3508,13 @@
       });
     }
 
-    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === TOGGLE_HOTKEY_KEY) {
+    if (isAltShiftKey(e, TOGGLE_HOTKEY_KEY)) {
       e.preventDefault();
       setWidgetHidden(!STATE.isWidgetHidden);
     }
 
     // Alt+Shift+O - toggle ask panel open/closed
-    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === "O") {
+    if (isAltShiftKey(e, "O")) {
       e.preventDefault();
       const panel = document.getElementById("__sr-panel");
       if (panel) {
@@ -3345,7 +3527,7 @@
     }
 
     
-    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === SMART_MCQ_HOTKEY_KEY) {
+    if (isAltShiftKey(e, SMART_MCQ_HOTKEY_KEY)) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
@@ -3365,7 +3547,7 @@
       runHeadlessAskForMCQ()
         .then(async (answers) => {
           const result = await clickCorrectMCQOptions(answers);
-          showMCQResults(answers);
+          showMCQResults(answers, result);
           return result;
         })
         .then((result) => {
@@ -3383,7 +3565,7 @@
         });
     }
 
-    if (e.altKey && e.shiftKey && String(e.key || "").toUpperCase() === SMART_ACTION_HOTKEY_KEY) {
+    if (isAltShiftKey(e, SMART_ACTION_HOTKEY_KEY)) {
       e.preventDefault();
       e.stopImmediatePropagation();
       if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
