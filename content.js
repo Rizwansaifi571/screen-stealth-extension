@@ -547,7 +547,9 @@
 
   function shouldRunDeepSolve({ deepSolve, mode, customQuestion, difficulty }) {
     if (!deepSolve) return false;
-    if (mode === "code") return true;
+    // Code answers are re-checked only when the first pass looks cut off, incomplete or invalid
+    // (handled by the callers), not on every request - that doubled the wait.
+    if (mode === "code") return false;
     if (difficulty === "hard" || difficulty === "medium") return true;
     if (String(customQuestion || "").split(/\s+/).filter(Boolean).length >= 20) return true;
     return false;
@@ -918,9 +920,15 @@
       
       debugHotkeyLog("mcq success", { answerCount: answers.length });
       return answers;
+    } catch (error) {
+      endRequestSession(session);
+      STATE.isLoading = false;
+      syncPanelAfterRequest(error?.message);
+      throw error;
     } finally {
       endRequestSession(session);
       STATE.isLoading = false;
+      syncPanelAfterRequest();
     }
   }
 
@@ -1388,6 +1396,45 @@
     }
   }
 
+  function syncPanelLoadingStart() {
+    const panel = document.getElementById("__sr-panel");
+    if (!panel) return;
+    const askBtn = panel.querySelector("#sr-ask-btn");
+    if (askBtn) {
+      askBtn.disabled = false;
+      askBtn.textContent = "stop";
+    }
+    const answerEl = panel.querySelector("#sr-answer");
+    if (answerEl) {
+      answerEl.textContent = "";
+      answerEl.className = "sr-answer sr-loading";
+    }
+  }
+
+  // Resets the panel's ask button / answer area after a hotkey-driven flow ends.
+  function syncPanelAfterRequest(errorMessage) {
+    const panel = document.getElementById("__sr-panel");
+    if (!panel) return;
+
+    const askBtn = panel.querySelector("#sr-ask-btn");
+    if (askBtn) {
+      askBtn.disabled = false;
+      askBtn.textContent = "ask";
+    }
+
+    const answerEl = panel.querySelector("#sr-answer");
+    if (!answerEl || !answerEl.classList.contains("sr-loading")) return;
+
+    if (errorMessage) {
+      answerEl.className = "sr-answer sr-error";
+      answerEl.textContent = "Error: " + errorMessage;
+      STATE.answerText = "Error: " + errorMessage;
+      STATE.answerClass = "sr-answer sr-error";
+    } else {
+      answerEl.className = "sr-answer";
+    }
+  }
+
   // Stops any in-flight AI request and any typing in progress.
   function stopEverything() {
     const aborted = abortActiveRequest();
@@ -1460,6 +1507,7 @@
     STATE.deepSolve = deepSolve;
     persistUiState();
     const session = beginRequestSession();
+    syncPanelLoadingStart();
 
     try {
       if (provider === "gemini" && !GEMINI_API_KEYS.length) {
@@ -1563,10 +1611,16 @@
       }
 
       return reply;
+    } catch (error) {
+      endRequestSession(session);
+      STATE.isLoading = false;
+      syncPanelAfterRequest(error?.message);
+      throw error;
     } finally {
       endRequestSession(session);
       STATE.isLoading = false;
       persistUiState();
+      syncPanelAfterRequest();
     }
   }
 
@@ -2242,10 +2296,12 @@
   }
 
   const REQUEST_TIMEOUT_MS = 45000;
+  const SESSION_TIMEOUT_MS = 100000;
   let requestAbortController = null;
 
   function beginRequestSession() {
     requestAbortController = new AbortController();
+    requestAbortController.startedAt = Date.now();
     return requestAbortController;
   }
 
@@ -2268,6 +2324,15 @@
     const controller = new AbortController();
     const sessionSignal = requestAbortController?.signal;
     let timedOut = false;
+
+    // Overall cap so several slow models in a row cannot stall for minutes.
+    if (requestAbortController?.startedAt) {
+      const remaining = SESSION_TIMEOUT_MS - (Date.now() - requestAbortController.startedAt);
+      if (remaining <= 1000) {
+        throw new Error("Timed out waiting for the AI provider. Try again or press ask later.");
+      }
+      timeoutMs = Math.min(timeoutMs, remaining);
+    }
 
     const onSessionAbort = () => controller.abort();
     if (sessionSignal) {
@@ -3125,7 +3190,6 @@
 
   loadUiState();
   injectTab();
-  logBodyText();
 
   // Alt+Shift+` (backtick) stops any in-flight AI request and any typing.
   // Alt+Shift+X is a backup in case the OS/layout swallows the backtick combo.
