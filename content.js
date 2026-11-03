@@ -2136,9 +2136,19 @@
           text.includes("not available") ||
           text.includes("unknown")));
 
+    const isOverloaded =
+      status === 500 ||
+      status === 502 ||
+      status === 503 ||
+      status === 504 ||
+      text.includes("high demand") ||
+      text.includes("overloaded") ||
+      text.includes("unavailable") ||
+      text.includes("try again later");
+
     const isBadRequest = status === 400 || text.includes("invalid argument");
 
-    return { isRateOrQuota, isInvalidKey, isModelUnavailable, isBadRequest };
+    return { isRateOrQuota, isInvalidKey, isModelUnavailable, isOverloaded, isBadRequest };
   }
 
   function convertMessagesToGeminiPayload(
@@ -2369,7 +2379,7 @@
           continue;
         }
 
-        if (kind.isModelUnavailable) {
+        if (kind.isModelUnavailable || kind.isOverloaded) {
           activeGeminiModelIndex = (modelIndex + 1) % GEMINI_MODELS.length;
           break;
         }
@@ -2460,7 +2470,7 @@
           continue;
         }
 
-        if (kind.isModelUnavailable) {
+        if (kind.isModelUnavailable || res.status >= 500) {
           activeGroqModelIndex = (modelIndex + 1) % GROQ_MODELS.length;
           break;
         }
@@ -3200,7 +3210,9 @@
           debugHotkeyLog("mcq flow result", result);
         })
         .catch((error) => {
-          console.warn("[SR-EXT] MCQ skipped:", error?.message || error);
+          if (error?.message !== "Request cancelled.") {
+            console.warn("[SR-EXT] MCQ skipped:", error?.message || error);
+          }
           debugHotkeyLog("mcq flow error", error?.message || String(error));
         })
         .finally(() => {
@@ -3234,7 +3246,9 @@
           debugHotkeyLog("flow result", result);
         })
         .catch((error) => {
-          console.warn("[SR-EXT] Alt+Shift+Q skipped:", error?.message || error);
+          if (error?.message !== "Request cancelled.") {
+            console.warn("[SR-EXT] Alt+Shift+Q skipped:", error?.message || error);
+          }
           debugHotkeyLog("flow error", error?.message || String(error));
         })
         .finally(() => {
