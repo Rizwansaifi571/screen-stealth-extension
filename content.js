@@ -41,12 +41,14 @@
   const TOGGLE_HOTKEY_KEY = "H";
   const SMART_ACTION_HOTKEY_KEY = "Q";
   const SMART_MCQ_HOTKEY_KEY = "A";
+  const SMART_THEORY_HOTKEY_KEY = "T";
   const HOTKEY_DEBUG = window.ENV?.HOTKEY_DEBUG === true;
   const MAX_HISTORY_ITEMS = 6;
   const MAX_RAW_PAGE_TEXT_CHARS = 50000;
   const MAX_PAGE_CONTEXT_CHARS = 10000;
   const MCQ_PAGE_CONTEXT_CHARS = 24000;
   const MAX_SELECTED_TEXT_CHARS = 1400;
+  const GROQ_REASONING_HEADROOM_TOKENS = 2048;
   const STOPWORDS = new Set([
     "a",
     "an",
@@ -228,6 +230,7 @@
       STATE.isWidgetHidden = Boolean(saved?.isWidgetHidden);
       STATE.questionText = typeof saved?.questionText === "string" ? saved.questionText : "";
       STATE.mode = typeof saved?.mode === "string" ? saved.mode : "code";
+      if (STATE.mode === "answer") STATE.mode = "theory"; // "short answer" was replaced by "theory answer"
       STATE.usePageContext = saved?.usePageContext !== false;
       STATE.deepSolve = saved?.deepSolve !== false;
       STATE.typingSpeed = clamp(
@@ -567,9 +570,10 @@
 
   function shouldRunDeepSolve({ deepSolve, mode, customQuestion, difficulty }) {
     if (!deepSolve) return false;
-    // Code answers are re-checked only when the first pass looks cut off, incomplete or invalid
-    // (handled by the callers), not on every request - that doubled the wait.
-    if (mode === "code") return false;
+    // Code and theory answers are re-checked only when the first pass looks cut off, incomplete
+    // or invalid (handled by the caller), not on every request - that doubled the wait and,
+    // for theory, tended to reshape the answer length.
+    if (mode === "code" || mode === "theory") return false;
     if (difficulty === "hard" || difficulty === "medium") return true;
     if (String(customQuestion || "").split(/\s+/).filter(Boolean).length >= 20) return true;
     return false;
@@ -585,7 +589,8 @@
 
     if (mode === "code" && clean.length < 20) return true;
     if (mode === "code" && !isCodeOnlyReplyValid(clean)) return true;
-    if (mode !== "code" && clean.length < 16) return true;
+    if (mode === "explain" && clean.length < 16) return true;
+    if (mode === "theory" && clean.length < 20) return true;
 
     return false;
   }
@@ -665,8 +670,24 @@
     return true;
   }
 
+  // Theory answers are typed into plain answer boxes, so drop markdown decoration.
+  function stripMarkdownForTyping(text) {
+    return String(text || "")
+      .replace(/```[a-zA-Z0-9#+._-]*\n?/g, "")
+      .replace(/\*\*([\s\S]+?)\*\*/g, "$1")
+      .replace(/__([\s\S]+?)__/g, "$1")
+      .replace(/(^|[\s(])\*(?!\s)([^*\n]+?)\*(?=[\s).,;:!?]|$)/g, "$1$2")
+      .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
+      .replace(/^[ \t]*[*\u2022][ \t]+/gm, "- ")
+      .replace(/`([^`\n]+)`/g, "$1")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
   function sanitizeReply(reply, mode) {
     let clean = String(reply || "").replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+
+    if (mode === "theory") return stripMarkdownForTyping(clean);
 
     if (mode === "code") {
       const fencedAnywhere = clean.match(/```[a-zA-Z0-9#+._-]*\s*\n([\s\S]*?)```/i);
@@ -690,6 +711,12 @@
 
     if (mode === "mcq") {
       return 8192;
+    }
+
+    if (mode === "theory") {
+      if (difficulty === "hard") return isVerificationPass ? 3600 : 3200;
+      if (difficulty === "medium") return isVerificationPass ? 2600 : 2200;
+      return isVerificationPass ? 1600 : 1400;
     }
 
     if (mode === "explain") {
@@ -927,19 +954,28 @@
       throw new Error("Deep mode is set to Gemini, but no GEMINI API keys are configured.");
     }
 
+    // Thinking / reasoning tokens are counted against the output limit, so the limit has to
+    // cover the visible answer PLUS the thinking budget or the answer comes back cut off or empty.
     const callModel = (messages, { temperature, isVerificationPass, minTokens = 0 }) => {
-      const maxCompletionTokens = Math.max(
+      const answerTokens = Math.max(
         minTokens,
         getMaxCompletionTokens(mode, difficulty, isVerificationPass)
       );
 
-      return provider === "gemini"
-        ? requestGeminiWithKeyRotation(messages, {
-            temperature,
-            maxCompletionTokens,
-            thinkingBudget: getGeminiThinkingBudget(difficulty, mode, isVerificationPass),
-          })
-        : requestGroqWithKeyRotation(messages, { temperature, maxCompletionTokens });
+      if (provider === "gemini") {
+        const thinkingBudget = getGeminiThinkingBudget(difficulty, mode, isVerificationPass);
+
+        return requestGeminiWithKeyRotation(messages, {
+          temperature,
+          maxCompletionTokens: Math.min(answerTokens + thinkingBudget, 60000),
+          thinkingBudget,
+        });
+      }
+
+      return requestGroqWithKeyRotation(messages, {
+        temperature,
+        maxCompletionTokens: answerTokens + GROQ_REASONING_HEADROOM_TOKENS,
+      });
     };
 
     const firstPass = await callModel(
@@ -1655,6 +1691,7 @@
 
   function getLatestGeneratedCode() {
     const current = String(STATE.answerText || "").trim();
+    if (STATE.mode === "theory" && current && STATE.answerClass === "sr-answer") return current;
     if (current && detectCodeLanguage(current)) {
       return extractCodeForCopy(current);
     }
@@ -1774,6 +1811,10 @@
     return aborted || wasTyping || wasClicking;
   }
 
+  function getTypeButtonLabel() {
+    return STATE.mode === "theory" ? "type answer" : "type code";
+  }
+
   function updateTypeButton(panel, message, resetDelayMs = 1400) {
     const typeBtn = panel?.querySelector("#sr-type-btn");
     if (!typeBtn) return;
@@ -1781,11 +1822,12 @@
     typeBtn.textContent = message;
     setTimeout(() => {
       const liveBtn = document.getElementById("sr-type-btn");
-      if (liveBtn) liveBtn.textContent = "type code";
+      if (liveBtn) liveBtn.textContent = getTypeButtonLabel();
     }, resetDelayMs);
   }
 
-  async function runHeadlessAskForCode() {
+  // Hotkey flow: read the page (or the selected question), answer it, return the text to type.
+  async function runHeadlessAsk(mode = "code") {
     if (STATE.isLoading) {
       debugHotkeyLog("ask skipped: assistant already loading");
       throw new Error("Assistant is already generating a response.");
@@ -1793,7 +1835,6 @@
 
     await ensureApiKeysLoaded();
 
-    const mode = "code";
     const usePageContext = true;
     const deepSolve = STATE.deepSolve !== false;
     const selectedText = getSelectedText();
@@ -1801,6 +1842,7 @@
     const { bodyText, difficulty } = preparePrompt({ mode, usePageContext, customQuestion, selectedText });
 
     debugHotkeyLog("ask start", {
+      mode,
       provider: deepSolve ? "gemini" : "groq",
       deepSolve,
       difficulty,
@@ -2070,7 +2112,8 @@
       return;
     }
 
-    const language = detectCodeLanguage(answerText);
+    // Theory answers are prose even when they mention words like "print" or "import"
+    const language = STATE.mode === "theory" ? null : detectCodeLanguage(answerText);
     const copyText = language ? extractCodeForCopy(answerText) : answerText.trim();
 
     copyBtn.style.display = "inline-block";
@@ -2089,7 +2132,11 @@
     if (typeBtn) {
       typeBtn.style.display = "inline-block";
       typeBtn.dataset.typeText = copyText;
-      typeBtn.title = "Type text into focused editor (Alt+Shift+Q)";
+      typeBtn.textContent = getTypeButtonLabel();
+      typeBtn.title =
+        STATE.mode === "theory"
+          ? "Type the answer into the focused answer box (Alt+Shift+T)"
+          : "Type text into focused editor (Alt+Shift+Q)";
     }
   }
 
@@ -2160,6 +2207,21 @@
       ].join(" ");
     }
 
+    if (mode === "theory") {
+      return [
+        "You are an expert exam writer answering a theory / descriptive / reasoning question.",
+        "Write the answer a top student would write, with exactly the length and depth the question asks for.",
+        "SIZE RULES: if the question or page states a word limit, line limit or number of marks, follow it (about 25-30 words per mark: 2 marks = 2-3 sentences, 5 marks = about 150 words, 10 marks = about 300 words as short paragraphs or numbered points).",
+        "If no size is stated, choose it from the command word: define / what is / state = 1-3 sentences; explain / describe / why / how = one or two short paragraphs; discuss / compare / differentiate / advantages and disadvantages = short numbered or paired points; derive / prove / show that / reasoning = clear numbered steps that end with the conclusion.",
+        "For yes/no or choose-one reasoning questions give the conclusion first, then the justification.",
+        "If the question has parts such as (a), (b), (c), answer each part under its own label.",
+        "Do not pad, do not repeat the question, do not add a preamble such as 'Sure' or 'Here is', and never mention word counts.",
+        "Output plain text only: no markdown symbols (no **, #, backticks or tables). Separate paragraphs with a blank line and number points as '1.', '2.'.",
+        "Answer in the same language as the question.",
+        "Think carefully and silently so the facts and reasoning are correct.",
+      ].join(" ");
+    }
+
     if (mode === "explain") {
       return [
         "You are a clear and accurate study and coding assistant.",
@@ -2215,6 +2277,8 @@
       finalUserMessage += `Latest user question/instruction:\n${cleanQuestion}\n\n`;
     } else if (mode === "mcq") {
       finalUserMessage += "No typed question was provided. Find every multiple choice question and its options on the current page.\n\n";
+    } else if (mode === "theory" || mode === "explain") {
+      finalUserMessage += "No typed question was provided. Find the main question shown in the page context and answer it.\n\n";
     } else {
       finalUserMessage += "No typed question was provided. Identify the main coding problem from the page context and solve it.\n\n";
     }
@@ -2250,17 +2314,13 @@
         "Return one array item per question, in the order the questions appear on the page, including questions that repeat the same option texts.",
         "Do not return code, explanations, letters, or markdown.",
       ].join("\n");
-    } else if (mode === "answer") {
-      if (isLikelyMcqContext(cleanPageText)) {
-        finalUserMessage += [
-          "This is a multiple choice page.",
-          "Answer every question in page order.",
-          "Use one single line per question in this format: (A) Correct option - short explanation.",
-          "Do not output code or markdown tables.",
-        ].join("\n");
-      } else {
-        finalUserMessage += "Output format: final answer first, then short key reasoning only if needed. Do not output code unless the user explicitly asks for code.";
-      }
+    } else if (mode === "theory") {
+      finalUserMessage += [
+        "Task:",
+        "Write the final theory answer exactly as it should be typed into the answer box.",
+        "Choose the ideal length from any marks, word limit or line limit shown in the question or page context; if none is shown, choose it from the question's command word.",
+        "Plain text only, no markdown, no preamble.",
+      ].join("\n");
     } else {
       finalUserMessage += "Output format: brief but complete explanation.";
     }
@@ -2340,6 +2400,12 @@
               "Return ONLY a valid JSON array of objects in page order.",
               "Each object must contain option (exact correct option text) and explanation (one short single-line explanation).",
               "Do not return code, explanations, letters, or markdown.",
+            ].join("\n")
+        : mode === "theory"
+          ? [
+              "Check the draft for factual and logical mistakes and for missing parts of the question.",
+              "Return the complete corrected answer in the SAME format and about the SAME length.",
+              "Plain text only, no markdown, no preamble.",
             ].join("\n")
         : "Verify the draft answer carefully. Correct any mistakes and return a concise but complete final answer.";
 
@@ -2877,6 +2943,11 @@
 
     try {
       const selectedText = usePageContext ? getSelectedText() : "";
+
+      if (!customQuestion && !selectedText && !usePageContext) {
+        throw new Error('Type a question, or tick "page" so I can read the question from the page.');
+      }
+
       const { bodyText, difficulty } = preparePrompt({
         mode,
         usePageContext,
@@ -3031,7 +3102,7 @@
           <select id="sr-mode-select" class="sr-mode-select" title="Answer mode">
             <option value="code">code only</option>
             <option value="mcq">MCQ select answers</option>
-            <option value="answer">short answer</option>
+            <option value="theory">theory answer</option>
             <option value="explain">explain</option>
           </select>
         </div>
@@ -3431,7 +3502,7 @@
       isSmartHotkeyFlowRunning = true;
       debugHotkeyLog("hotkey accepted: Alt+Shift+Q");
 
-      runHeadlessAskForCode()
+      runHeadlessAsk("code")
         .then((reply) => typeCodeIntoEditor(reply))
         .then((result) => {
           debugHotkeyLog("flow result", result);
@@ -3445,6 +3516,39 @@
         .finally(() => {
           isSmartHotkeyFlowRunning = false;
           debugHotkeyLog("flow finished");
+        });
+    }
+
+    // Alt+Shift+T - answer a theory / reasoning question and type the answer into the focused box
+    if (isAltShiftKey(e, SMART_THEORY_HOTKEY_KEY)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.repeat || isTypingCodeNow || isSmartHotkeyFlowRunning) {
+        debugHotkeyLog("theory skipped", { reason: "flow-in-progress" });
+        return;
+      }
+
+      const livePanel = document.getElementById("__sr-panel");
+      const liveMode = livePanel?.querySelector("#sr-mode-select");
+      if (liveMode) liveMode.value = "theory";
+
+      isSmartHotkeyFlowRunning = true;
+      debugHotkeyLog("hotkey accepted: Alt+Shift+T (theory)");
+
+      runHeadlessAsk("theory")
+        .then((reply) => typeCodeIntoEditor(reply))
+        .then((result) => {
+          debugHotkeyLog("theory flow result", result);
+        })
+        .catch((error) => {
+          if (error?.message !== "Request cancelled.") {
+            console.warn("[SR-EXT] Alt+Shift+T skipped:", error?.message || error);
+          }
+          debugHotkeyLog("theory flow error", error?.message || String(error));
+        })
+        .finally(() => {
+          isSmartHotkeyFlowRunning = false;
+          debugHotkeyLog("theory flow finished");
         });
     }
   }, true);
