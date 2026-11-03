@@ -1157,10 +1157,106 @@
     return optionRows >= 3;
   }
 
+  const TRAILING_AUTOCLOSE_JUNK = /^[\s)\]}"'`>;]*$/;
+
+  function pressEditorKey(el, key, keyCode, { ctrl = false, shift = false } = {}) {
+    const init = {
+      key,
+      code: key,
+      keyCode,
+      which: keyCode,
+      ctrlKey: ctrl,
+      shiftKey: shift,
+      bubbles: true,
+      cancelable: true,
+    };
+    el.dispatchEvent(new KeyboardEvent("keydown", init));
+    el.dispatchEvent(new KeyboardEvent("keyup", init));
+  }
+
+  // Editors auto-insert closing brackets/quotes. Typing our own closers leaves the editor's
+  // copies after the caret at the end, so remove that trailing leftover (only if it is just
+  // closers/whitespace, never real code).
+  async function cleanupAutoClosedTrailing(el, allowMonacoKeyCleanup = false) {
+    try {
+      if (el.closest?.(".monaco-editor")) {
+        if (!allowMonacoKeyCleanup) return;
+        pressEditorKey(el, "End", 35, { ctrl: true, shift: true });
+        await sleep(80);
+        const selected = String(el.value || "");
+        if (selected && TRAILING_AUTOCLOSE_JUNK.test(selected)) {
+          pressEditorKey(el, "Delete", 46);
+        } else if (selected) {
+          pressEditorKey(el, "ArrowLeft", 37);
+        }
+        return;
+      }
+
+      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+        const value = String(el.value || "");
+        const caret = Number.isFinite(el.selectionStart) ? el.selectionStart : value.length;
+        const tail = value.slice(caret);
+        if (tail && TRAILING_AUTOCLOSE_JUNK.test(tail)) {
+          el.setRangeText("", caret, value.length, "end");
+          el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true }));
+        }
+        return;
+      }
+
+      const selection = window.getSelection?.();
+      if (!selection || !selection.rangeCount) return;
+      const range = selection.getRangeAt(0).cloneRange();
+      range.setEnd(el, el.childNodes.length);
+      const tail = range.toString();
+      if (tail && TRAILING_AUTOCLOSE_JUNK.test(tail)) {
+        selection.removeAllRanges();
+        selection.addRange(range);
+        document.execCommand("delete");
+      }
+    } catch (_) {
+      // Cleanup is best-effort
+    }
+  }
+
+  function setMonacoTypingMode(enable) {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ action: "monacoTypingMode", enable }, (res) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false });
+            return;
+          }
+          resolve(res || { ok: false });
+        });
+      } catch (_) {
+        resolve({ ok: false });
+      }
+    });
+  }
+
   async function typeTextHumanLike(el, text) {
+    const isMonacoTarget = Boolean(el?.closest?.(".monaco-editor"));
+    // With auto-closing and auto-indent switched off, the typed code lands exactly as written.
+    const monacoReady = isMonacoTarget ? (await setMonacoTypingMode(true)).ok === true : false;
+
+    try {
+      return await typeTextHumanLikeInner(el, text, isMonacoTarget && !monacoReady);
+    } finally {
+      if (monacoReady) await setMonacoTypingMode(false);
+    }
+  }
+
+  async function typeTextHumanLikeInner(el, text, monacoUnconfigured) {
     if (!el || !text) return { success: false, charsTyped: 0 };
 
-    const content = normalizeCodeFormatting(text);
+    // Monaco keeps its document in JS, so we cannot read the caret/indent from the DOM.
+    // For brace languages let the editor auto-indent instead of typing our own indentation.
+    const unknownDoc = monacoUnconfigured;
+    const skipDomReads = Boolean(el.closest?.(".monaco-editor"));
+    let content = normalizeCodeFormatting(text);
+    if (unknownDoc && ["cpp", "java", "javascript", "c"].includes(detectCodeLanguage(content))) {
+      content = content.replace(/^[ \t]+/gm, "");
+    }
     if (!content) return { success: false, charsTyped: 0 };
 
     // Common code editors (Monaco/Ace/LeetCode) auto-indent on Enter
@@ -1245,7 +1341,7 @@
           return { success: charsTyped > 0, charsTyped, cancelled: true };
         }
 
-        if (shouldSkipAutoClosedChar(el, content, i, ch)) {
+        if (!skipDomReads && shouldSkipAutoClosedChar(el, content, i, ch)) {
           continue;
         }
 
@@ -1259,7 +1355,7 @@
 
         if (ch === "\n") {
           await sleep(24);
-          pendingIndentSkip = getCurrentLineIndent(el);
+          pendingIndentSkip = skipDomReads ? "" : getCurrentLineIndent(el);
         }
 
         // Periodic human thinking pause (every ~50-80 chars)
@@ -1268,6 +1364,7 @@
         }
       }
 
+      await cleanupAutoClosedTrailing(el, unknownDoc);
       el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true }));
       return { success: charsTyped > 0, charsTyped };
     }
@@ -1295,7 +1392,7 @@
           return { success: charsTyped > 0, charsTyped, cancelled: true };
         }
 
-        if (shouldSkipAutoClosedChar(el, content, i, ch)) {
+        if (!skipDomReads && shouldSkipAutoClosedChar(el, content, i, ch)) {
           continue;
         }
 
@@ -1309,7 +1406,7 @@
 
         if (ch === "\n") {
           await sleep(24);
-          pendingIndentSkip = getCurrentLineIndent(el);
+          pendingIndentSkip = skipDomReads ? "" : getCurrentLineIndent(el);
         }
 
         // Periodic human thinking pause
@@ -1318,6 +1415,7 @@
         }
       }
 
+      await cleanupAutoClosedTrailing(el, unknownDoc);
       return { success: charsTyped > 0, charsTyped };
     }
 
